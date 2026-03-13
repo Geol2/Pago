@@ -1,0 +1,10 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="pagoGradient" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5E9" />
+      <stop offset="1" stop-color="#10B981" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="#0F172A" />
+  <path d="M20 46V18H35.5C41.299 18 46 22.701 46 28.5C46 34.299 41.299 39 35.5 39H28V46H20ZM28 31H34.5C36.9853 31 39 28.9853 39 26.5C39 24.0147 36.9853 22 34.5 22H28V31Z" fill="url(#pagoGradient)" />
+</svg>
