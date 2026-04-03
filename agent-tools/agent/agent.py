@@ -64,21 +64,33 @@ def chat_with_spinner(messages: list, step: int, step_history: list):
                     "tools": TOOL_DEFINITIONS,
                     "stream": True,
                     "options": {"temperature": 0.2, "num_ctx": 16384},
+                    "think": False,
                 },
                 stream=True,
                 timeout=(10, 180),
             )
             resp.raise_for_status()
+            in_think = False
             for raw_line in resp.iter_lines():
                 if not raw_line:
                     continue
                 chunk = json.loads(raw_line)
                 msg   = chunk.get("message", {})
+
+                # tool_calls는 어느 청크에나 올 수 있음
+                if msg.get("tool_calls"):
+                    tool_calls.extend(msg["tool_calls"])
+
                 token = msg.get("content", "")
                 if token:
+                    # <think> 블록 필터링 (Qwen3 thinking 모드)
+                    if "<think>" in token:
+                        in_think = True
+                    if in_think:
+                        if "</think>" in token:
+                            in_think = False
+                        continue
                     token_q.put(token)
-                if chunk.get("done"):
-                    tool_calls.extend(msg.get("tool_calls") or [])
         except Exception as exc:
             err_box["exc"] = exc
         finally:
@@ -100,7 +112,7 @@ def chat_with_spinner(messages: list, step: int, step_history: list):
                     elapsed = int(time.time() - start)
                     live.update(Text.assemble(
                         spinner.render(time.time()), " ",
-                        ("첫 응답 대기 중... ", "dim"),
+                        ("생각 중... ", "dim"),
                         (f"(step {step})", "dim cyan"),
                         ("  ", ""),
                         (f"{elapsed}s", "bold yellow"),
@@ -202,11 +214,8 @@ def run_tools_parallel(parsed_calls: list) -> list:
 
 
 def run_agent(user_input: str):
-    claude_md = cache.get_file("CLAUDE.md") or ""
     system_prompt = (
         SYSTEM_PROMPT
-        + "\n\n## CLAUDE.md (프로젝트 규칙 — 이미 로드됨)\n"
-        + claude_md
         + "\n\n"
         + cache.build_index_summary()
     )
@@ -224,13 +233,8 @@ def run_agent(user_input: str):
         tool_calls = message.get("tool_calls") or []
 
         if not tool_calls:
-            content = message.get("content", "").strip()
-            console.print(Panel(
-                Markdown(content),
-                title="[bold green]답변[/bold green]",
-                border_style="green",
-                box=box.ROUNDED,
-            ))
+            # 스트리밍으로 이미 출력됨 — 구분선만 표시
+            console.print("─" * 60, style="dim green")
             return
 
         # 도구 파싱
