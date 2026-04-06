@@ -4,125 +4,101 @@ Claude Code의 5시간/7일 사용량 한도를 실시간으로 확인하는 Pyt
 
 ## 특징
 
-- ✅ macOS Keychain에서 자동으로 인증 토큰 가져오기
-- 📊 5시간 rolling window 사용률 확인
-- 📅 7일 주간 한도 사용률 확인
-- 🎨 프로그레스 바로 시각적 표시
-- ⏰ 리셋까지 남은 시간 표시
-- ⚠️ 80% 초과 시 경고 메시지
+- Windows / macOS 자동 인증 (Keychain / credentials.json)
+- 5시간 rolling window 및 7일 주간 한도 사용률 확인
+- 데스크탑 위젯: 접기/펴기 토글, 항상 위, 1분 자동 갱신
+- 게이지 그래프: matplotlib 기반 시각화
+- 리셋까지 남은 시간 표시 / 80% 초과 시 경고
+
+## 파일 구성
+
+```
+usage-checker/
+├── claude_usage.py          # 통합 메인 스크립트
+├── Claude사용량.bat          # 위젯 실행 (터미널 창 포함)
+├── Claude사용량.vbs          # 위젯 실행 (콘솔 창 없이)
+```
 
 ## 요구사항
 
-- **Windows, macOS, Linux 모두 지원!**
 - Python 3.7+
-- Claude Code가 설치되어 있고 로그인된 상태
-  - Windows: `%APPDATA%\Claude Code\credentials.json` 사용
-  - macOS: Keychain 사용
+- Claude Code 로그인 상태
+  - Windows: `~/.claude/.credentials.json`
+  - macOS: Keychain (`Claude Code-credentials`)
+- 그래프 기능: `pip install matplotlib`
 
 ## 설치
 
 ```bash
-# 1. 패키지 설치
 pip install -r requirements.txt
-
-# 2. 실행 권한 부여
-chmod +x claude_usage_checker.py
 ```
 
 ## 사용법
 
+### 터미널 텍스트 출력
+
 ```bash
-# 방법 1: Python으로 직접 실행 (Windows/macOS/Linux 모두)
-python3 claude_usage_checker_v2.py
-
-# 방법 2: 기본 버전 (macOS 전용)
-python3 claude_usage_checker.py
-
-# 방법 3: 실행 파일처럼 사용 (macOS/Linux)
-chmod +x claude_usage_checker_v2.py
-./claude_usage_checker_v2.py
+python claude_usage.py
 ```
 
-## 출력 예시
+### 데스크탑 위젯 (접기/펴기)
 
+```bash
+python claude_usage.py --desktop
 ```
-🤖 Claude Code 사용량 체커
-------------------------------------------------------------
-✓ 인증 성공! (플랜: PRO)
 
-📡 사용량 정보를 가져오는 중...
+헤더 오른쪽 `▲/▼` 버튼으로 접기/펴기 가능:
+- **펼침**: 프로그레스 바 + 리셋 시간 표시
+- **접힘**: `5h 17%  7d 21%` 한 줄 미니뷰
 
-============================================================
-📊 Claude Code 사용량 현황
-============================================================
+Windows 더블클릭 실행:
+- `Claude사용량.bat` — 터미널 창 포함
+- `Claude사용량.vbs` — 콘솔 창 없이 백그라운드 실행
 
-🕐 5시간 Rolling Window
-   사용률: 23.5%
-   [█████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
-   리셋: 3시간 42분 후
+### 게이지 그래프 (matplotlib)
 
-📅 7일 주간 한도
-   사용률: 15.8%
-   [██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
-   리셋: 4일 12시간 후
-
-============================================================
-
-💡 Tip: 'claude /status' 명령어로도 터미널에서 확인 가능합니다.
+```bash
+python claude_usage.py --graph
 ```
+
+Windows 더블클릭 실행:
+- `Claude사용량그래프.bat` — 터미널 창 포함
+- `Claude사용량그래프.vbs` — 콘솔 창 없이 실행
 
 ## API 정보
 
-이 프로그램은 다음 엔드포인트를 사용합니다:
-- `GET https://api.anthropic.com/api/oauth/usage`
-
-**인증 방법:**
-- **Windows**: `%APPDATA%\Claude Code\credentials.json` 파일
-- **macOS**: Keychain의 "Claude Code-credentials" 서비스
-- **Linux**: Windows와 동일한 파일 경로 시도
+- 엔드포인트: `GET https://api.anthropic.com/api/oauth/usage`
+- 인증: OAuth Bearer 토큰 (Claude Code 로그인 시 자동 발급)
 
 ## 문제 해결
 
-### Windows: "Claude Code 인증 정보를 찾을 수 없습니다"
-
-1. **Claude Code 설치 확인**
-   ```cmd
-   npm install -g @anthropic-ai/claude-code
-   ```
-
-2. **로그인 확인**
-   ```cmd
-   claude logout
-   claude login
-   ```
-
-3. **credentials.json 위치 확인**
-   - 기본 경로: `%APPDATA%\Claude Code\credentials.json`
-   - 파워셸에서 확인: `explorer $env:APPDATA\Claude Code`
-
-### macOS: "Keychain에서 Claude Code 인증 정보를 찾을 수 없습니다"
+### 인증 정보를 찾을 수 없는 경우
 
 ```bash
-# Claude Code에 다시 로그인
 claude logout
 claude login
 ```
 
-### 공통: "인증 실패. 토큰이 만료되었을 수 있습니다"
+Windows에서 credentials 위치 확인:
+```cmd
+explorer %USERPROFILE%\.claude
+```
+
+### 토큰 만료
 
 ```bash
-# 토큰 갱신
 claude logout
 claude login
 ```
 
 ## 추가 기능 아이디어
 
-- [x] Windows/Linux 지원 (완료!)
-- [ ] 터미널 상태바 통합 (tmux/zsh)
-- [ ] JSON 출력 모드 추가
+- [x] Windows/macOS 지원
+- [x] 게이지 그래프 시각화
+- [x] 데스크탑 위젯 접기/펴기
+- [ ] 사용량 히스토리 로깅 & 추이 그래프
 - [ ] cron으로 주기적 알림
-- [ ] 웹 대시보드 버전
+- [ ] 터미널 상태바 통합 (tmux/zsh)
 
 ## 참고 자료
 
