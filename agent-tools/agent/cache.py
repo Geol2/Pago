@@ -5,7 +5,7 @@ import os
 import re
 import fnmatch
 import time
-from config import PROJECT_ROOT
+import config
 
 # 캐시할 확장자
 INCLUDE_EXTS = {".java", ".xml", ".jsp", ".js", ".properties", ".md", ".gradle"}
@@ -59,13 +59,13 @@ def load(verbose: bool = True) -> None:
     start = time.time()
     skipped = 0
 
-    for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
+    for dirpath, dirnames, filenames in os.walk(config.PROJECT_ROOT):
         # 제외 디렉터리는 탐색하지 않음
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
 
         for fname in filenames:
             abs_path = os.path.join(dirpath, fname)
-            rel_path = os.path.relpath(abs_path, PROJECT_ROOT).replace("\\", "/")
+            rel_path = os.path.relpath(abs_path, config.PROJECT_ROOT).replace("\\", "/")
 
             if not _should_include(rel_path):
                 skipped += 1
