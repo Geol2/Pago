@@ -304,6 +304,7 @@ def run_graph(checker: ClaudeUsageChecker):
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     import numpy as np
+    import threading
 
     if sys.platform == "win32":
         plt.rcParams["font.family"] = "Malgun Gothic"
@@ -313,75 +314,131 @@ def run_graph(checker: ClaudeUsageChecker):
         plt.rcParams["font.family"] = "NanumGothic"
     plt.rcParams["axes.unicode_minus"] = False
 
-    data = checker.usage_data or {}
-    fh = data.get("five_hour") or {}
-    sd = data.get("seven_day") or {}
-    u5 = fh.get("utilization", 0)
-    u7 = sd.get("utilization", 0)
-    r5_label = "리셋: " + checker.format_reset_time(fh.get("resets_at"))
-    r7_label = "리셋: " + checker.format_reset_time(sd.get("resets_at"))
-
     def gauge_color(pct):
         if pct > 80: return "#f38ba8"
         if pct > 50: return "#f9e2af"
         return "#a6e3a1"
 
-    def draw_gauge(ax, pct, title, reset_label):
-        pct = min(pct, 100)
-        color = gauge_color(pct)
-        theta = np.linspace(np.pi, 0, 200)
-        ax.plot(np.cos(theta), np.sin(theta), lw=18, color="#313244", solid_capstyle="round")
-        ft = np.linspace(np.pi, np.pi - np.pi * (pct / 100), 200)
-        ax.plot(np.cos(ft), np.sin(ft), lw=18, color=color, solid_capstyle="round")
-        ax.set_xlim(-1.3, 1.3); ax.set_ylim(-0.3, 1.2)
-        ax.set_aspect("equal"); ax.axis("off")
-        ax.text(0, 0.22, f"{pct:.1f}%", ha="center", va="center",
-                fontsize=22, fontweight="bold", color=color)
-        ax.text(0, -0.05, title, ha="center", va="center", fontsize=11, color="#cdd6f4")
-        ax.text(0, -0.22, reset_label, ha="center", va="center", fontsize=8, color="#6c7086")
+    def get_next_reset_time(data: dict) -> Optional[datetime]:
+        """데이터에서 가장 가까운 리셋 시각을 반환."""
+        times = []
+        for key in ("five_hour", "seven_day"):
+            d = data.get(key) or {}
+            rs = d.get("resets_at")
+            if rs:
+                try:
+                    t = datetime.fromisoformat(rs.replace("Z", "+00:00"))
+                    times.append(t)
+                except Exception:
+                    pass
+        return min(times) if times else None
 
-    def draw_bar(ax):
-        labels = ["5시간 Rolling", "7일 주간"]
-        values = [min(u5, 100), min(u7, 100)]
-        colors = [gauge_color(v) for v in values]
-        ax.set_facecolor("#1e1e2e")
-        bars = ax.barh(labels, values, color=colors, height=0.45)
-        ax.axvline(x=100, color="#6c7086", lw=1.2, linestyle="--", alpha=0.7)
-        ax.axvline(x=80,  color="#f9e2af", lw=0.8, linestyle=":",  alpha=0.5)
-        for bar, val in zip(bars, values):
-            ax.text(val + 1, bar.get_y() + bar.get_height() / 2,
-                    f"{val:.1f}%", va="center", fontsize=10,
-                    color="#cdd6f4", fontweight="bold")
-        ax.set_xlim(0, 115)
-        ax.set_xlabel("사용률 (%)", color="#cdd6f4", fontsize=9)
-        ax.tick_params(colors="#cdd6f4", labelsize=9)
-        ax.spines[:].set_color("#313244")
-        ax.text(80,  -0.6, "80%\n경고", ha="center", fontsize=7, color="#f9e2af", alpha=0.8)
-        ax.text(100, -0.6, "100%\n한도", ha="center", fontsize=7, color="#6c7086", alpha=0.8)
+    def draw_all(fig):
+        fig.clear()
+        data = checker.usage_data or {}
+        fh = data.get("five_hour") or {}
+        sd = data.get("seven_day") or {}
+        u5 = fh.get("utilization", 0)
+        u7 = sd.get("utilization", 0)
+        r5_label = "리셋: " + checker.format_reset_time(fh.get("resets_at"))
+        r7_label = "리셋: " + checker.format_reset_time(sd.get("resets_at"))
+
+        fig.patch.set_facecolor("#1e1e2e")
+        fig.suptitle("Claude Code 사용량 현황", color="#cdd6f4",
+                     fontsize=15, fontweight="bold", y=0.97)
+        fig.text(0.99, 0.01, f"갱신: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                 ha="right", va="bottom", color="#6c7086", fontsize=7)
+
+        def draw_gauge(ax, pct, title, reset_label):
+            pct = min(pct, 100)
+            color = gauge_color(pct)
+            theta = np.linspace(np.pi, 0, 200)
+            ax.plot(np.cos(theta), np.sin(theta), lw=18, color="#313244", solid_capstyle="round")
+            ft = np.linspace(np.pi, np.pi - np.pi * (pct / 100), 200)
+            ax.plot(np.cos(ft), np.sin(ft), lw=18, color=color, solid_capstyle="round")
+            ax.set_xlim(-1.3, 1.3); ax.set_ylim(-0.3, 1.2)
+            ax.set_aspect("equal"); ax.axis("off")
+            ax.text(0, 0.22, f"{pct:.1f}%", ha="center", va="center",
+                    fontsize=22, fontweight="bold", color=color)
+            ax.text(0, -0.05, title, ha="center", va="center", fontsize=11, color="#cdd6f4")
+            ax.text(0, -0.22, reset_label, ha="center", va="center", fontsize=8, color="#6c7086")
+
+        def draw_bar(ax):
+            labels = ["5시간 Rolling", "7일 주간"]
+            values = [min(u5, 100), min(u7, 100)]
+            colors = [gauge_color(v) for v in values]
+            ax.set_facecolor("#1e1e2e")
+            bars = ax.barh(labels, values, color=colors, height=0.45)
+            ax.axvline(x=100, color="#6c7086", lw=1.2, linestyle="--", alpha=0.7)
+            ax.axvline(x=80,  color="#f9e2af", lw=0.8, linestyle=":",  alpha=0.5)
+            for bar, val in zip(bars, values):
+                ax.text(val + 1, bar.get_y() + bar.get_height() / 2,
+                        f"{val:.1f}%", va="center", fontsize=10,
+                        color="#cdd6f4", fontweight="bold")
+            ax.set_xlim(0, 115)
+            ax.set_xlabel("사용률 (%)", color="#cdd6f4", fontsize=9)
+            ax.tick_params(colors="#cdd6f4", labelsize=9)
+            ax.spines[:].set_color("#313244")
+            ax.text(80,  -0.6, "80%\n경고", ha="center", fontsize=7, color="#f9e2af", alpha=0.8)
+            ax.text(100, -0.6, "100%\n한도", ha="center", fontsize=7, color="#6c7086", alpha=0.8)
+
+        ax1 = fig.add_axes([0.02, 0.38, 0.44, 0.52])
+        ax2 = fig.add_axes([0.54, 0.38, 0.44, 0.52])
+        draw_gauge(ax1, u5, "5시간 Rolling Window", r5_label)
+        draw_gauge(ax2, u7, "7일 주간 한도", r7_label)
+
+        ax3 = fig.add_axes([0.08, 0.08, 0.84, 0.26])
+        draw_bar(ax3)
+
+        legend_elements = [
+            mpatches.Patch(color="#a6e3a1", label="정상 (0~50%)"),
+            mpatches.Patch(color="#f9e2af", label="주의 (50~80%)"),
+            mpatches.Patch(color="#f38ba8", label="경고 (80%+)"),
+        ]
+        fig.legend(handles=legend_elements, loc="lower right",
+                   bbox_to_anchor=(0.99, 0.36), fontsize=8,
+                   facecolor="#313244", edgecolor="#6c7086",
+                   labelcolor="#cdd6f4", framealpha=0.9)
+        fig.canvas.draw_idle()
 
     fig = plt.figure(figsize=(10, 5.5), facecolor="#1e1e2e")
-    fig.suptitle("Claude Code 사용량 현황", color="#cdd6f4",
-                 fontsize=15, fontweight="bold", y=0.97)
-    fig.text(0.99, 0.01, f"갱신: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-             ha="right", va="bottom", color="#6c7086", fontsize=7)
+    draw_all(fig)
 
-    ax1 = fig.add_axes([0.02, 0.38, 0.44, 0.52])
-    ax2 = fig.add_axes([0.54, 0.38, 0.44, 0.52])
-    draw_gauge(ax1, u5, "5시간 Rolling Window", r5_label)
-    draw_gauge(ax2, u7, "7일 주간 한도", r7_label)
+    # ── 리셋 감지 타이머 ──
+    _fetching = threading.Event()
 
-    ax3 = fig.add_axes([0.08, 0.08, 0.84, 0.26])
-    draw_bar(ax3)
+    def check_reset():
+        if not plt.fignum_exists(fig.number):
+            return
+        data = checker.usage_data or {}
+        next_reset = get_next_reset_time(data)
+        if next_reset:
+            now = datetime.now(next_reset.tzinfo)
+            if now >= next_reset and not _fetching.is_set():
+                _fetching.set()
+                def _fetch_and_redraw():
+                    checker.fetch_usage()
+                    _fetching.clear()
+                    # matplotlib은 메인 스레드에서만 그릴 수 있으므로 타이머로 위임
+                    timer_redraw.start()
+                threading.Thread(target=_fetch_and_redraw, daemon=True).start()
 
-    legend_elements = [
-        mpatches.Patch(color="#a6e3a1", label="정상 (0~50%)"),
-        mpatches.Patch(color="#f9e2af", label="주의 (50~80%)"),
-        mpatches.Patch(color="#f38ba8", label="경고 (80%+)"),
-    ]
-    fig.legend(handles=legend_elements, loc="lower right",
-               bbox_to_anchor=(0.99, 0.36), fontsize=8,
-               facecolor="#313244", edgecolor="#6c7086",
-               labelcolor="#cdd6f4", framealpha=0.9)
+        timer_check.start()
+
+    def do_redraw():
+        if plt.fignum_exists(fig.number):
+            draw_all(fig)
+
+    # 1초마다 리셋 여부 체크, 리셋 후 즉시 재그리기용 원샷 타이머
+    timer_check  = fig.canvas.new_timer(interval=1000)
+    timer_check.add_callback(check_reset)
+    timer_check.single_shot = True
+
+    timer_redraw = fig.canvas.new_timer(interval=100)
+    timer_redraw.add_callback(do_redraw)
+    timer_redraw.single_shot = True
+
+    timer_check.start()
     plt.show()
 
 
