@@ -25,12 +25,39 @@ from typing import Optional, Dict, Any
 # ──────────────────────────────────────────────
 
 class ClaudeUsageChecker:
-    API_URL = "https://api.anthropic.com/api/oauth/usage"
+    API_URL     = "https://api.anthropic.com/api/oauth/usage"
+    ACCOUNT_URL = "https://api.anthropic.com/api/oauth/account"
     KEYCHAIN_SERVICE = "Claude Code-credentials"
+    KEY_LABELS = {
+        "five_hour": "5시간 Rolling Window",
+        "seven_day": "7일 주간 한도",
+    }
+    PLAN_LABELS = {
+        "claude_pro":      "Claude Pro",
+        "claude_max_5x":   "Claude Max (x5)",
+        "claude_max_20x":  "Claude Max (x20)",
+        "claude_free":     "Claude Free",
+        "pro":             "Claude Pro",
+        "max_5x":          "Claude Max (x5)",
+        "max_20x":         "Claude Max (x20)",
+        "free":            "Claude Free",
+    }
 
     def __init__(self):
         self.token: Optional[str] = None
         self.usage_data: Optional[Dict[str, Any]] = None
+        self.plan_name: Optional[str] = None
+
+    def get_usage_sections(self) -> list:
+        """API 응답에서 utilization 필드를 가진 모든 항목을 (key, data, label) 리스트로 반환."""
+        if not self.usage_data:
+            return []
+        sections = []
+        for key, data in self.usage_data.items():
+            if isinstance(data, dict) and "utilization" in data:
+                label = self.KEY_LABELS.get(key, key.replace("_", " ").title())
+                sections.append((key, data, label))
+        return sections
 
     def get_credentials_from_keychain(self) -> bool:
         if sys.platform == "win32":
@@ -81,22 +108,48 @@ class ClaudeUsageChecker:
         except json.JSONDecodeError:
             return False
 
-    def fetch_usage(self) -> bool:
-        if not self.token:
-            return False
-        headers = {
+    def _auth_headers(self) -> dict:
+        return {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.token}",
             "anthropic-beta": "oauth-2025-04-20",
         }
+
+    def _extract_plan(self, data: dict) -> Optional[str]:
+        """응답 데이터에서 플랜 식별자를 찾아 표시 이름으로 반환."""
+        for field in ("plan_type", "plan", "subscription_type", "tier", "subscription"):
+            val = data.get(field)
+            if isinstance(val, str) and val:
+                return self.PLAN_LABELS.get(val.lower(), val)
+            if isinstance(val, dict):
+                inner = val.get("type") or val.get("plan_type") or val.get("name")
+                if isinstance(inner, str) and inner:
+                    return self.PLAN_LABELS.get(inner.lower(), inner)
+        return None
+
+    def fetch_usage(self) -> bool:
+        if not self.token:
+            return False
         try:
-            response = requests.get(self.API_URL, headers=headers, timeout=10)
+            response = requests.get(self.API_URL, headers=self._auth_headers(), timeout=10)
             if response.status_code == 200:
                 self.usage_data = response.json()
+                self.plan_name = self._extract_plan(self.usage_data)
+                if not self.plan_name:
+                    self._fetch_plan_from_account()
                 return True
             return False
         except requests.exceptions.RequestException:
             return False
+
+    def _fetch_plan_from_account(self):
+        """account 엔드포인트에서 플랜 정보를 보완 시도."""
+        try:
+            resp = requests.get(self.ACCOUNT_URL, headers=self._auth_headers(), timeout=10)
+            if resp.status_code == 200:
+                self.plan_name = self._extract_plan(resp.json())
+        except requests.exceptions.RequestException:
+            pass
 
     def format_reset_time(self, reset_time_str: Optional[str]) -> str:
         if not reset_time_str:
@@ -114,22 +167,22 @@ class ClaudeUsageChecker:
             return reset_time_str
 
     def print_usage(self):
-        if not self.usage_data:
+        sections = self.get_usage_sections()
+        if not sections:
             print("사용량 데이터가 없습니다.")
             return
         print("\n" + "=" * 60)
-        print("Claude Code 사용량 현황")
+        plan_str = f"  [{self.plan_name}]" if self.plan_name else ""
+        print(f"Claude Code 사용량 현황{plan_str}")
         print("=" * 60)
-        for key, label in [("five_hour", "5시간 Rolling Window"), ("seven_day", "7일 주간 한도")]:
-            d = self.usage_data.get(key)
-            if d:
-                u = d.get("utilization", 0)
-                bar = "█" * min(40, int(40 * u / 100)) + "░" * max(0, 40 - int(40 * u / 100))
-                over = " (초과)" if u > 100 else ""
-                print(f"\n{label}")
-                print(f"  {u:.1f}%{over}")
-                print(f"  [{bar}]")
-                print(f"  리셋: {self.format_reset_time(d.get('resets_at'))}")
+        for key, d, label in sections:
+            u = d.get("utilization", 0)
+            bar = "█" * min(40, int(40 * u / 100)) + "░" * max(0, 40 - int(40 * u / 100))
+            over = " (초과)" if u > 100 else ""
+            print(f"\n{label}")
+            print(f"  {u:.1f}%{over}")
+            print(f"  [{bar}]")
+            print(f"  리셋: {self.format_reset_time(d.get('resets_at'))}")
         print("\n" + "=" * 60)
 
     def run(self):
@@ -199,6 +252,10 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
                          font=("Segoe UI", 10, "bold"))
     lbl_title.pack(side="left")
 
+    lbl_plan = tk.Label(header, text="", bg=BG, fg=GRAY,
+                        font=("Segoe UI", 8))
+    lbl_plan.pack(side="left", padx=(6, 0))
+
     # 접힌 상태 미니 수치
     lbl_mini = tk.Label(header, text="", bg=BG, fg=GREEN,
                         font=("Consolas", 9))
@@ -227,13 +284,28 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
         rst_lbl.pack(fill="x", padx=14, pady=(0, 6))
         return pct_lbl, bar_lbl, rst_lbl
 
-    lbl_5h_pct, lbl_5h_bar, lbl_5h_rst = make_section(panel, "5시간 Rolling Window")
-    tk.Frame(panel, bg=GRAY, height=1).pack(fill="x", padx=8)
-    lbl_7d_pct, lbl_7d_bar, lbl_7d_rst = make_section(panel, "7일 주간 한도")
-    tk.Frame(panel, bg=GRAY, height=1).pack(fill="x", padx=8)
+    sections_frame = tk.Frame(panel, bg=BG)
+    sections_frame.pack(fill="x")
 
     lbl_updated = tk.Label(panel, bg=BG, fg=GRAY, font=("Segoe UI", 7), anchor="e")
     lbl_updated.pack(fill="x", padx=10, pady=4)
+
+    _section_labels: dict = {}   # key -> (pct_lbl, bar_lbl, rst_lbl)
+    _sections_built = [False]
+
+    def build_sections():
+        for w in sections_frame.winfo_children():
+            w.destroy()
+        _section_labels.clear()
+        sections = checker.get_usage_sections()
+        for i, (key, d, label) in enumerate(sections):
+            if i > 0:
+                tk.Frame(sections_frame, bg=GRAY, height=1).pack(fill="x", padx=8)
+            lbls = make_section(sections_frame, label)
+            _section_labels[key] = lbls
+        if sections:
+            tk.Frame(sections_frame, bg=GRAY, height=1).pack(fill="x", padx=8)
+        _sections_built[0] = True
 
     # ── 접기/펴기 ──
     def toggle(_event=None):
@@ -255,33 +327,32 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
             if not checker.token:
                 checker.get_credentials_from_keychain()
             checker.fetch_usage()
+            if not _sections_built[0]:
+                root.after(0, build_sections)
         threading.Thread(target=_call, daemon=True).start()
         root.after(REFRESH_MS, fetch_api)
 
     # ── 화면 갱신 (1초마다) ──
     def tick():
-        if checker.usage_data:
-            fh = checker.usage_data.get("five_hour") or {}
-            sd = checker.usage_data.get("seven_day") or {}
-            u5 = fh.get("utilization", 0)
-            u7 = sd.get("utilization", 0)
-
-            # 미니뷰 수치
-            lbl_mini.config(
-                text=f"5h {u5:.0f}%  7d {u7:.0f}%",
-                fg=pct_color(max(u5, u7))
-            )
-
-            # 펼쳐진 패널
-            lbl_5h_pct.config(text=f"  {u5:.1f}%{'  초과' if u5 > 100 else ''}",
-                               fg=pct_color(u5))
-            lbl_5h_bar.config(text=f"  [{make_bar(u5)}]", fg=pct_color(u5))
-            lbl_5h_rst.config(text=f"  리셋: {checker.format_reset_time(fh.get('resets_at'))}")
-
-            lbl_7d_pct.config(text=f"  {u7:.1f}%{'  초과' if u7 > 100 else ''}",
-                               fg=pct_color(u7))
-            lbl_7d_bar.config(text=f"  [{make_bar(u7)}]", fg=pct_color(u7))
-            lbl_7d_rst.config(text=f"  리셋: {checker.format_reset_time(sd.get('resets_at'))}")
+        if checker.usage_data and _sections_built[0]:
+            if checker.plan_name:
+                lbl_plan.config(text=f"({checker.plan_name})")
+            sections = checker.get_usage_sections()
+            pcts = [d.get("utilization", 0) for _, d, _ in sections]
+            if pcts:
+                lbl_mini.config(
+                    text="  ".join(f"{label.split()[0]} {u:.0f}%" for _, d, label in sections
+                                   for u in [d.get("utilization", 0)]),
+                    fg=pct_color(max(pcts))
+                )
+            for key, d, label in sections:
+                if key not in _section_labels:
+                    continue
+                u = d.get("utilization", 0)
+                pct_lbl, bar_lbl, rst_lbl = _section_labels[key]
+                pct_lbl.config(text=f"  {u:.1f}%{'  초과' if u > 100 else ''}", fg=pct_color(u))
+                bar_lbl.config(text=f"  [{make_bar(u)}]", fg=pct_color(u))
+                rst_lbl.config(text=f"  리셋: {checker.format_reset_time(d.get('resets_at'))}")
 
         lbl_updated.config(text=f"갱신: {datetime.now().strftime('%H:%M:%S')}  ")
         root.after(TICK_MS, tick)
@@ -322,73 +393,86 @@ def run_graph(checker: ClaudeUsageChecker):
     def get_next_reset_time(data: dict) -> Optional[datetime]:
         """데이터에서 가장 가까운 리셋 시각을 반환."""
         times = []
-        for key in ("five_hour", "seven_day"):
-            d = data.get(key) or {}
+        for d in data.values():
+            if not isinstance(d, dict):
+                continue
             rs = d.get("resets_at")
             if rs:
                 try:
-                    t = datetime.fromisoformat(rs.replace("Z", "+00:00"))
-                    times.append(t)
+                    times.append(datetime.fromisoformat(rs.replace("Z", "+00:00")))
                 except Exception:
                     pass
         return min(times) if times else None
 
+    def draw_gauge(ax, pct, title, reset_label):
+        pct_capped = min(pct, 100)
+        color = gauge_color(pct)
+        theta = np.linspace(np.pi, 0, 200)
+        ax.plot(np.cos(theta), np.sin(theta), lw=18, color="#313244", solid_capstyle="round")
+        ft = np.linspace(np.pi, np.pi - np.pi * (pct_capped / 100), 200)
+        ax.plot(np.cos(ft), np.sin(ft), lw=18, color=color, solid_capstyle="round")
+        ax.set_xlim(-1.3, 1.3); ax.set_ylim(-0.3, 1.2)
+        ax.set_aspect("equal"); ax.axis("off")
+        ax.text(0, 0.22, f"{pct:.1f}%", ha="center", va="center",
+                fontsize=22, fontweight="bold", color=color)
+        ax.text(0, -0.05, title, ha="center", va="center", fontsize=11, color="#cdd6f4")
+        ax.text(0, -0.22, reset_label, ha="center", va="center", fontsize=8, color="#6c7086")
+
+    def draw_bar(ax, sections):
+        labels = [label for _, _, label in sections]
+        values = [min(d.get("utilization", 0), 100) for _, d, _ in sections]
+        colors = [gauge_color(v) for v in values]
+        ax.set_facecolor("#1e1e2e")
+        bars = ax.barh(labels, values, color=colors, height=0.45)
+        ax.axvline(x=100, color="#6c7086", lw=1.2, linestyle="--", alpha=0.7)
+        ax.axvline(x=80,  color="#f9e2af", lw=0.8, linestyle=":",  alpha=0.5)
+        for bar, val in zip(bars, values):
+            ax.text(val + 1, bar.get_y() + bar.get_height() / 2,
+                    f"{val:.1f}%", va="center", fontsize=10,
+                    color="#cdd6f4", fontweight="bold")
+        ax.set_xlim(0, 115)
+        ax.set_xlabel("사용률 (%)", color="#cdd6f4", fontsize=9)
+        ax.tick_params(colors="#cdd6f4", labelsize=9)
+        ax.spines[:].set_color("#313244")
+        ax.text(80,  -0.6, "80%\n경고", ha="center", fontsize=7, color="#f9e2af", alpha=0.8)
+        ax.text(100, -0.6, "100%\n한도", ha="center", fontsize=7, color="#6c7086", alpha=0.8)
+
     def draw_all(fig):
         fig.clear()
-        data = checker.usage_data or {}
-        fh = data.get("five_hour") or {}
-        sd = data.get("seven_day") or {}
-        u5 = fh.get("utilization", 0)
-        u7 = sd.get("utilization", 0)
-        r5_label = "리셋: " + checker.format_reset_time(fh.get("resets_at"))
-        r7_label = "리셋: " + checker.format_reset_time(sd.get("resets_at"))
+        sections = checker.get_usage_sections()
 
         fig.patch.set_facecolor("#1e1e2e")
-        fig.suptitle("Claude Code 사용량 현황", color="#cdd6f4",
+        plan_str = f"  [{checker.plan_name}]" if checker.plan_name else ""
+        fig.suptitle(f"Claude Code 사용량 현황{plan_str}", color="#cdd6f4",
                      fontsize=15, fontweight="bold", y=0.97)
         fig.text(0.99, 0.01, f"갱신: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                  ha="right", va="bottom", color="#6c7086", fontsize=7)
 
-        def draw_gauge(ax, pct, title, reset_label):
-            pct = min(pct, 100)
-            color = gauge_color(pct)
-            theta = np.linspace(np.pi, 0, 200)
-            ax.plot(np.cos(theta), np.sin(theta), lw=18, color="#313244", solid_capstyle="round")
-            ft = np.linspace(np.pi, np.pi - np.pi * (pct / 100), 200)
-            ax.plot(np.cos(ft), np.sin(ft), lw=18, color=color, solid_capstyle="round")
-            ax.set_xlim(-1.3, 1.3); ax.set_ylim(-0.3, 1.2)
-            ax.set_aspect("equal"); ax.axis("off")
-            ax.text(0, 0.22, f"{pct:.1f}%", ha="center", va="center",
-                    fontsize=22, fontweight="bold", color=color)
-            ax.text(0, -0.05, title, ha="center", va="center", fontsize=11, color="#cdd6f4")
-            ax.text(0, -0.22, reset_label, ha="center", va="center", fontsize=8, color="#6c7086")
+        if not sections:
+            ax = fig.add_axes([0.1, 0.1, 0.8, 0.8])
+            ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center",
+                    transform=ax.transAxes, color="#cdd6f4", fontsize=14)
+            ax.axis("off")
+            fig.canvas.draw_idle()
+            return
 
-        def draw_bar(ax):
-            labels = ["5시간 Rolling", "7일 주간"]
-            values = [min(u5, 100), min(u7, 100)]
-            colors = [gauge_color(v) for v in values]
-            ax.set_facecolor("#1e1e2e")
-            bars = ax.barh(labels, values, color=colors, height=0.45)
-            ax.axvline(x=100, color="#6c7086", lw=1.2, linestyle="--", alpha=0.7)
-            ax.axvline(x=80,  color="#f9e2af", lw=0.8, linestyle=":",  alpha=0.5)
-            for bar, val in zip(bars, values):
-                ax.text(val + 1, bar.get_y() + bar.get_height() / 2,
-                        f"{val:.1f}%", va="center", fontsize=10,
-                        color="#cdd6f4", fontweight="bold")
-            ax.set_xlim(0, 115)
-            ax.set_xlabel("사용률 (%)", color="#cdd6f4", fontsize=9)
-            ax.tick_params(colors="#cdd6f4", labelsize=9)
-            ax.spines[:].set_color("#313244")
-            ax.text(80,  -0.6, "80%\n경고", ha="center", fontsize=7, color="#f9e2af", alpha=0.8)
-            ax.text(100, -0.6, "100%\n한도", ha="center", fontsize=7, color="#6c7086", alpha=0.8)
+        n = len(sections)
+        gauge_h = 0.52
+        gauge_y = 0.38
+        gauge_w = min(0.44, 0.90 / n)
+        spacing = (0.90 - n * gauge_w) / max(n - 1, 1) if n > 1 else 0
+        start_x = (1.0 - (n * gauge_w + (n - 1) * spacing)) / 2
 
-        ax1 = fig.add_axes([0.02, 0.38, 0.44, 0.52])
-        ax2 = fig.add_axes([0.54, 0.38, 0.44, 0.52])
-        draw_gauge(ax1, u5, "5시간 Rolling Window", r5_label)
-        draw_gauge(ax2, u7, "7일 주간 한도", r7_label)
+        for i, (key, d, label) in enumerate(sections):
+            u = d.get("utilization", 0)
+            r_label = "리셋: " + checker.format_reset_time(d.get("resets_at"))
+            x = start_x + i * (gauge_w + spacing)
+            ax = fig.add_axes([x, gauge_y, gauge_w, gauge_h])
+            draw_gauge(ax, u, label, r_label)
 
-        ax3 = fig.add_axes([0.08, 0.08, 0.84, 0.26])
-        draw_bar(ax3)
+        bar_h = max(0.08 + 0.06 * n, 0.26)
+        ax_bar = fig.add_axes([0.08, 0.06, 0.84, bar_h])
+        draw_bar(ax_bar, sections)
 
         legend_elements = [
             mpatches.Patch(color="#a6e3a1", label="정상 (0~50%)"),
