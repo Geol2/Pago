@@ -265,6 +265,10 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
                           font=("Segoe UI", 9), cursor="hand2")
     btn_toggle.pack(side="right")
 
+    btn_refresh = tk.Label(header, text="↺", bg=BG, fg=GRAY,
+                           font=("Segoe UI", 11), cursor="hand2")
+    btn_refresh.pack(side="right", padx=(0, 6))
+
     tk.Frame(root, bg=GRAY, height=1).pack(fill="x", padx=8)
 
     # ────────────────────────────────
@@ -319,6 +323,20 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
             expanded.set(True)
 
     btn_toggle.bind("<Button-1>", toggle)
+
+    def refresh_now(_event=None):
+        btn_refresh.config(text="…", fg=FG)
+        import threading
+        def _call():
+            if not checker.token:
+                checker.get_credentials_from_keychain()
+            checker.fetch_usage()
+            if not _sections_built[0]:
+                root.after(0, build_sections)
+            root.after(0, lambda: btn_refresh.config(text="↺", fg=GRAY))
+        threading.Thread(target=_call, daemon=True).start()
+
+    btn_refresh.bind("<Button-1>", refresh_now)
 
     # ── API fetch (백그라운드) ──
     def fetch_api():
@@ -447,6 +465,8 @@ def run_graph(checker: ClaudeUsageChecker):
                      fontsize=15, fontweight="bold", y=0.97)
         fig.text(0.99, 0.01, f"갱신: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                  ha="right", va="bottom", color="#6c7086", fontsize=7)
+        fig.text(0.01, 0.01, "R: 새로고침", ha="left", va="bottom",
+                 color="#6c7086", fontsize=7)
 
         if not sections:
             ax = fig.add_axes([0.1, 0.1, 0.8, 0.8])
@@ -522,6 +542,16 @@ def run_graph(checker: ClaudeUsageChecker):
     timer_redraw.add_callback(do_redraw)
     timer_redraw.single_shot = True
 
+    def on_key(event):
+        if event.key in ('r', 'R') and not _fetching.is_set():
+            _fetching.set()
+            def _fetch():
+                checker.fetch_usage()
+                _fetching.clear()
+                timer_redraw.start()
+            threading.Thread(target=_fetch, daemon=True).start()
+
+    fig.canvas.mpl_connect('key_press_event', on_key)
     timer_check.start()
     plt.show()
 
