@@ -1,2 +1,6 @@
 requests>=2.31.0
 questionary>=2.0.0
+
+# --tray 모드 (선택)
+# macOS:   pip install rumps
+# Windows: pip install pystray pillow

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Claude Code 사용량 체커 (통합본)
+  --tray     : 메뉴바(macOS) / 시스템 트레이(Windows) — 항상 표시 ★추천
   --desktop  : 접기/펴기 데스크탑 위젯
   --graph    : matplotlib 게이지 그래프
   (인수 없음): 터미널 텍스트 출력
@@ -557,11 +558,198 @@ def run_graph(checker: ClaudeUsageChecker):
 
 
 # ──────────────────────────────────────────────
+# 트레이 / 메뉴바 (macOS + Windows 공용)
+# ──────────────────────────────────────────────
+
+def _tray_color(pct: float) -> tuple:
+    """사용률에 따른 RGB 색상."""
+    if pct > 80: return (243, 139, 168)   # 빨강
+    if pct > 50: return (249, 226, 175)   # 노랑
+    return (166, 227, 161)                # 초록
+
+
+def _make_pil_icon(pct_max: float = 0):
+    """pystray용 PIL 아이콘 — 어두운 원 위에 게이지 호."""
+    from PIL import Image, ImageDraw
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([2, 2, 62, 62], fill=(30, 30, 46, 255))
+    if pct_max > 0:
+        color = _tray_color(pct_max) + (255,)
+        end_angle = -90 + 360 * min(pct_max, 100) / 100
+        draw.arc([8, 8, 56, 56], start=-90, end=end_angle, fill=color, width=10)
+    return img
+
+
+def run_tray(checker: ClaudeUsageChecker):
+    if sys.platform == "darwin":
+        _run_tray_macos(checker)
+    else:
+        _run_tray_windows(checker)
+
+
+def _run_tray_macos(checker: ClaudeUsageChecker):
+    try:
+        import rumps
+    except ImportError:
+        print("rumps 미설치: pip install rumps")
+        sys.exit(1)
+
+    import threading
+
+    REFRESH_SEC = 60
+
+    def _build_menu(fetch_cb):
+        items = []
+        sections = checker.get_usage_sections()
+
+        if checker.plan_name:
+            items.append(rumps.MenuItem(checker.plan_name))
+            items.append(None)
+
+        if sections:
+            for _, d, label in sections:
+                u = d.get("utilization", 0)
+                flag = "🔴" if u > 80 else "🟡" if u > 50 else "🟢"
+                reset = checker.format_reset_time(d.get("resets_at"))
+                items.append(rumps.MenuItem(f"{flag}  {label}:  {u:.1f}%"))
+                items.append(rumps.MenuItem(f"    리셋: {reset}"))
+                items.append(None)
+        else:
+            items.append(rumps.MenuItem("데이터 없음"))
+            items.append(None)
+
+        items.append(rumps.MenuItem("새로고침", callback=fetch_cb))
+        items.append(None)
+        items.append(rumps.MenuItem("종료", callback=rumps.quit_application))
+        return items
+
+    class UsageMenuBar(rumps.App):
+        def __init__(self):
+            super().__init__("☁ ...", quit_button=None)
+            self.menu = [rumps.MenuItem("로딩 중..."), None,
+                         rumps.MenuItem("종료", callback=rumps.quit_application)]
+            threading.Thread(target=self._fetch, daemon=True).start()
+            rumps.Timer(self._auto_refresh, REFRESH_SEC).start()
+
+        def _auto_refresh(self, _):
+            threading.Thread(target=self._fetch, daemon=True).start()
+
+        def _fetch(self):
+            if not checker.token:
+                checker.get_credentials_from_keychain()
+            checker.fetch_usage()
+            self._update()
+
+        def _update(self):
+            sections = checker.get_usage_sections()
+            pcts = [d.get("utilization", 0) for _, d, _ in sections]
+            self.title = ("☁ " + " | ".join(f"{int(p)}%" for p in pcts)) if pcts else "☁ --"
+            self.menu = _build_menu(
+                lambda _: threading.Thread(target=self._fetch, daemon=True).start()
+            )
+
+    UsageMenuBar().run()
+
+
+def _run_tray_windows(checker: ClaudeUsageChecker):
+    try:
+        import pystray
+    except ImportError:
+        print("pystray 미설치: pip install pystray pillow")
+        sys.exit(1)
+    try:
+        from PIL import Image  # noqa: F401 — import check only
+    except ImportError:
+        print("Pillow 미설치: pip install pillow")
+        sys.exit(1)
+
+    import threading
+
+    _stop = threading.Event()
+    _icon_holder: list = [None]
+
+    def _tooltip() -> str:
+        sections = checker.get_usage_sections()
+        if not sections:
+            return "Claude Code 사용량"
+        header = f"Claude Code{' (' + checker.plan_name + ')' if checker.plan_name else ''}"
+        lines = [header] + [
+            f"{label}: {d.get('utilization', 0):.1f}%"
+            for _, d, label in sections
+        ]
+        return "\n".join(lines)
+
+    def _make_menu():
+        items = []
+        sections = checker.get_usage_sections()
+
+        if checker.plan_name:
+            items.append(pystray.MenuItem(checker.plan_name, None, enabled=False))
+            items.append(pystray.Menu.SEPARATOR)
+
+        if sections:
+            for _, d, label in sections:
+                u = d.get("utilization", 0)
+                flag = "🔴" if u > 80 else "🟡" if u > 50 else "🟢"
+                reset = checker.format_reset_time(d.get("resets_at"))
+                items.append(pystray.MenuItem(f"{flag} {label}: {u:.1f}%", None, enabled=False))
+                items.append(pystray.MenuItem(f"  리셋: {reset}", None, enabled=False))
+                items.append(pystray.Menu.SEPARATOR)
+        else:
+            items.append(pystray.MenuItem("데이터 없음", None, enabled=False))
+            items.append(pystray.Menu.SEPARATOR)
+
+        items.append(pystray.MenuItem("새로고침", _on_refresh))
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("종료", _on_quit))
+        return pystray.Menu(*items)
+
+    def _on_refresh(icon, item=None):
+        threading.Thread(target=_fetch_and_update, daemon=True).start()
+
+    def _on_quit(icon, item=None):
+        _stop.set()
+        icon.stop()
+
+    def _fetch_and_update():
+        if not checker.token:
+            checker.get_credentials_from_keychain()
+        checker.fetch_usage()
+        ic = _icon_holder[0]
+        if ic is None:
+            return
+        sections = checker.get_usage_sections()
+        pcts = [d.get("utilization", 0) for _, d, _ in sections]
+        ic.icon  = _make_pil_icon(max(pcts) if pcts else 0)
+        ic.title = _tooltip()
+        ic.menu  = _make_menu()
+
+    def _auto_refresh_loop():
+        while not _stop.wait(60):
+            _fetch_and_update()
+
+    icon = pystray.Icon(
+        "claude_usage",
+        _make_pil_icon(0),
+        "Claude Code 사용량",
+        pystray.Menu(pystray.MenuItem("로딩 중...", None, enabled=False)),
+    )
+    _icon_holder[0] = icon
+
+    threading.Thread(target=_fetch_and_update, daemon=True).start()
+    threading.Thread(target=_auto_refresh_loop, daemon=True).start()
+    icon.run()
+
+
+# ──────────────────────────────────────────────
 # 진입점
 # ──────────────────────────────────────────────
 
 def main():
-    mode = "--desktop" if "--desktop" in sys.argv else \
+    mode = "--tray"    if "--tray"    in sys.argv else \
+           "--desktop" if "--desktop" in sys.argv else \
            "--graph"   if "--graph"   in sys.argv else "cli"
 
     checker = ClaudeUsageChecker()
@@ -582,6 +770,9 @@ def main():
 
     elif mode == "--desktop":
         run_desktop_widget(checker)
+
+    elif mode == "--tray":
+        run_tray(checker)
 
 
 if __name__ == "__main__":
