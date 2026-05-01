@@ -561,6 +561,28 @@ def run_graph(checker: ClaudeUsageChecker):
 # 트레이 / 메뉴바 (macOS + Windows 공용)
 # ──────────────────────────────────────────────
 
+_TRAY_SHORT_LABELS: dict[str, str] = {
+    "5시간 Rolling Window": "5시간 창",
+    "7일 주간 한도":        "7일 한도",
+    "Seven Day Sonnet":    "7일 Sonnet",
+    "Seven Day Omelette":  "7일 Omelette",
+    "Extra Usage":         "추가 사용량",
+}
+
+
+def _short_label(label: str) -> str:
+    return _TRAY_SHORT_LABELS.get(label, label)
+
+
+def _pct_bar(pct: float, width: int = 12) -> str:
+    filled = min(width, round(width * min(pct, 100) / 100))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _flag(pct: float) -> str:
+    return "🔴" if pct > 80 else "🟡" if pct > 50 else "🟢"
+
+
 def _tray_color(pct: float) -> tuple:
     """사용률에 따른 RGB 색상."""
     if pct > 80: return (243, 139, 168)   # 빨강
@@ -604,25 +626,27 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
         items = []
         sections = checker.get_usage_sections()
 
+        # 헤더: 플랜명
         if checker.plan_name:
-            items.append(rumps.MenuItem(checker.plan_name))
+            items.append(rumps.MenuItem(f"  {checker.plan_name}"))
             items.append(None)
 
         if sections:
             for _, d, label in sections:
-                u = d.get("utilization", 0)
-                flag = "🔴" if u > 80 else "🟡" if u > 50 else "🟢"
-                reset = checker.format_reset_time(d.get("resets_at"))
-                items.append(rumps.MenuItem(f"{flag}  {label}:  {u:.1f}%"))
-                items.append(rumps.MenuItem(f"    리셋: {reset}"))
+                u    = d.get("utilization", 0)
+                rst  = checker.format_reset_time(d.get("resets_at"))
+                over = " 초과!" if u > 100 else ""
+                items.append(rumps.MenuItem(
+                    f"  {_flag(u)}  {_short_label(label)}   {_pct_bar(u)}  {u:.1f}%{over}"))
+                items.append(rumps.MenuItem(f"       리셋까지  {rst}"))
                 items.append(None)
         else:
-            items.append(rumps.MenuItem("데이터 없음"))
+            items.append(rumps.MenuItem("  데이터 없음"))
             items.append(None)
 
-        items.append(rumps.MenuItem("새로고침", callback=fetch_cb))
+        items.append(rumps.MenuItem("  ↺  새로고침", callback=fetch_cb))
         items.append(None)
-        items.append(rumps.MenuItem("종료", callback=rumps.quit_application))
+        items.append(rumps.MenuItem("  종료", callback=rumps.quit_application))
         return items
 
     class UsageMenuBar(rumps.App):
@@ -644,8 +668,14 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
 
         def _update(self):
             sections = checker.get_usage_sections()
-            pcts = [d.get("utilization", 0) for _, d, _ in sections]
-            self.title = ("☁ " + " | ".join(f"{int(p)}%" for p in pcts)) if pcts else "☁ --"
+            # 제목은 five_hour / seven_day 두 핵심 항목만 표시
+            priority = {"five_hour", "seven_day"}
+            title_pcts = [d.get("utilization", 0) for k, d, _ in sections if k in priority]
+            if not title_pcts:
+                title_pcts = [d.get("utilization", 0) for _, d, _ in sections]
+            self.title = ("☁ " + " | ".join(f"{int(p)}%" for p in title_pcts)) if title_pcts else "☁ --"
+            # clear() 없이 대입하면 rumps 내부 dict에 누적되므로 반드시 먼저 지움
+            self.menu.clear()
             self.menu = _build_menu(
                 lambda _: threading.Thread(target=self._fetch, daemon=True).start()
             )
@@ -674,42 +704,48 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
         sections = checker.get_usage_sections()
         if not sections:
             return "Claude Code 사용량"
-        header = f"Claude Code{' (' + checker.plan_name + ')' if checker.plan_name else ''}"
-        lines = [header] + [
-            f"{label}: {d.get('utilization', 0):.1f}%"
-            for _, d, label in sections
-        ]
-        return "\n".join(lines)
+        lines = [f"Claude Code  {checker.plan_name or ''}", ""]
+        for _, d, label in sections:
+            u   = d.get("utilization", 0)
+            rst = checker.format_reset_time(d.get("resets_at"))
+            lines.append(f"{_flag(u)}  {_short_label(label)}")
+            lines.append(f"   {_pct_bar(u)}  {u:.1f}%")
+            lines.append(f"   리셋까지  {rst}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     def _make_menu():
         items = []
         sections = checker.get_usage_sections()
 
         if checker.plan_name:
-            items.append(pystray.MenuItem(checker.plan_name, None, enabled=False))
+            items.append(pystray.MenuItem(f"  {checker.plan_name}", None, enabled=False))
             items.append(pystray.Menu.SEPARATOR)
 
         if sections:
             for _, d, label in sections:
-                u = d.get("utilization", 0)
-                flag = "🔴" if u > 80 else "🟡" if u > 50 else "🟢"
-                reset = checker.format_reset_time(d.get("resets_at"))
-                items.append(pystray.MenuItem(f"{flag} {label}: {u:.1f}%", None, enabled=False))
-                items.append(pystray.MenuItem(f"  리셋: {reset}", None, enabled=False))
+                u    = d.get("utilization", 0)
+                rst  = checker.format_reset_time(d.get("resets_at"))
+                over = " 초과!" if u > 100 else ""
+                items.append(pystray.MenuItem(
+                    f"  {_flag(u)}  {_short_label(label)}   {_pct_bar(u)}  {u:.1f}%{over}",
+                    None, enabled=False))
+                items.append(pystray.MenuItem(
+                    f"       리셋까지  {rst}", None, enabled=False))
                 items.append(pystray.Menu.SEPARATOR)
         else:
-            items.append(pystray.MenuItem("데이터 없음", None, enabled=False))
+            items.append(pystray.MenuItem("  데이터 없음", None, enabled=False))
             items.append(pystray.Menu.SEPARATOR)
 
-        items.append(pystray.MenuItem("새로고침", _on_refresh))
+        items.append(pystray.MenuItem("  ↺  새로고침", _on_refresh))
         items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem("종료", _on_quit))
+        items.append(pystray.MenuItem("  종료", _on_quit))
         return pystray.Menu(*items)
 
-    def _on_refresh(icon, item=None):
+    def _on_refresh(*_):
         threading.Thread(target=_fetch_and_update, daemon=True).start()
 
-    def _on_quit(icon, item=None):
+    def _on_quit(icon, *_):
         _stop.set()
         icon.stop()
 
