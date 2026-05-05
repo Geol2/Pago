@@ -177,7 +177,7 @@ class ClaudeUsageChecker:
         print(f"Claude Code 사용량 현황{plan_str}")
         print("=" * 60)
         for key, d, label in sections:
-            u = d.get("utilization", 0)
+            u = d.get("utilization") or 0
             bar = "█" * min(40, int(40 * u / 100)) + "░" * max(0, 40 - int(40 * u / 100))
             over = " (초과)" if u > 100 else ""
             print(f"\n{label}")
@@ -357,17 +357,17 @@ def run_desktop_widget(checker: ClaudeUsageChecker):
             if checker.plan_name:
                 lbl_plan.config(text=f"({checker.plan_name})")
             sections = checker.get_usage_sections()
-            pcts = [d.get("utilization", 0) for _, d, _ in sections]
+            pcts = [d.get("utilization") or 0 for _, d, _ in sections]
             if pcts:
                 lbl_mini.config(
                     text="  ".join(f"{label.split()[0]} {u:.0f}%" for _, d, label in sections
-                                   for u in [d.get("utilization", 0)]),
+                                   for u in [d.get("utilization") or 0]),
                     fg=pct_color(max(pcts))
                 )
             for key, d, label in sections:
                 if key not in _section_labels:
                     continue
-                u = d.get("utilization", 0)
+                u = d.get("utilization") or 0
                 pct_lbl, bar_lbl, rst_lbl = _section_labels[key]
                 pct_lbl.config(text=f"  {u:.1f}%{'  초과' if u > 100 else ''}", fg=pct_color(u))
                 bar_lbl.config(text=f"  [{make_bar(u)}]", fg=pct_color(u))
@@ -439,7 +439,7 @@ def run_graph(checker: ClaudeUsageChecker):
 
     def draw_bar(ax, sections):
         labels = [label for _, _, label in sections]
-        values = [min(d.get("utilization", 0), 100) for _, d, _ in sections]
+        values = [min(d.get("utilization") or 0, 100) for _, d, _ in sections]
         colors = [gauge_color(v) for v in values]
         ax.set_facecolor("#1e1e2e")
         bars = ax.barh(labels, values, color=colors, height=0.45)
@@ -485,7 +485,7 @@ def run_graph(checker: ClaudeUsageChecker):
         start_x = (1.0 - (n * gauge_w + (n - 1) * spacing)) / 2
 
         for i, (key, d, label) in enumerate(sections):
-            u = d.get("utilization", 0)
+            u = d.get("utilization") or 0
             r_label = "리셋: " + checker.format_reset_time(d.get("resets_at"))
             x = start_x + i * (gauge_w + spacing)
             ax = fig.add_axes([x, gauge_y, gauge_w, gauge_h])
@@ -633,7 +633,7 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
 
         if sections:
             for _, d, label in sections:
-                u    = d.get("utilization", 0)
+                u    = d.get("utilization") or 0
                 rst  = checker.format_reset_time(d.get("resets_at"))
                 over = " 초과!" if u > 100 else ""
                 items.append(rumps.MenuItem(
@@ -670,9 +670,9 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
             sections = checker.get_usage_sections()
             # 제목은 five_hour / seven_day 두 핵심 항목만 표시
             priority = {"five_hour", "seven_day"}
-            title_pcts = [d.get("utilization", 0) for k, d, _ in sections if k in priority]
+            title_pcts = [d.get("utilization") or 0 for k, d, _ in sections if k in priority]
             if not title_pcts:
-                title_pcts = [d.get("utilization", 0) for _, d, _ in sections]
+                title_pcts = [d.get("utilization") or 0 for _, d, _ in sections]
             self.title = ("☁ " + " | ".join(f"{int(p)}%" for p in title_pcts)) if title_pcts else "☁ --"
             # clear() 없이 대입하면 rumps 내부 dict에 누적되므로 반드시 먼저 지움
             self.menu.clear()
@@ -706,7 +706,7 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
             return "Claude Code 사용량"
         lines = [f"Claude Code  {checker.plan_name or ''}", ""]
         for _, d, label in sections:
-            u   = d.get("utilization", 0)
+            u   = d.get("utilization") or 0
             rst = checker.format_reset_time(d.get("resets_at"))
             lines.append(f"{_flag(u)}  {_short_label(label)}")
             lines.append(f"   {_pct_bar(u)}  {u:.1f}%")
@@ -724,7 +724,7 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
 
         if sections:
             for _, d, label in sections:
-                u    = d.get("utilization", 0)
+                u    = d.get("utilization") or 0
                 rst  = checker.format_reset_time(d.get("resets_at"))
                 over = " 초과!" if u > 100 else ""
                 items.append(pystray.MenuItem(
@@ -757,7 +757,7 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
         if ic is None:
             return
         sections = checker.get_usage_sections()
-        pcts = [d.get("utilization", 0) for _, d, _ in sections]
+        pcts = [d.get("utilization") or 0 for _, d, _ in sections]
         ic.icon  = _make_pil_icon(max(pcts) if pcts else 0)
         ic.title = _tooltip()
         ic.menu  = _make_menu()
