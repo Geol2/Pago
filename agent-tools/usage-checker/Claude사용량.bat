@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 > nul
+title AI 사용량
 SET PYTHONUTF8=1
 SET SCRIPT_DIR=%~dp0
 SET PY_SCRIPT=%SCRIPT_DIR%claude_usage.py

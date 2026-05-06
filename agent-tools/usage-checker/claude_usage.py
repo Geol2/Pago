@@ -695,24 +695,32 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
         print("Pillow 미설치: pip install pillow")
         sys.exit(1)
 
+    # 작업표시줄에 'python' 대신 'AI 사용량'으로 표시되도록 콘솔 창 제목 변경
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW("AI 사용량")
+    except Exception:
+        pass
+
     import threading
 
     _stop = threading.Event()
     _icon_holder: list = [None]
 
     def _tooltip() -> str:
+        # Windows 트레이 툴팁은 최대 128자 제한 — compact 포맷 + 안전 컷
         sections = checker.get_usage_sections()
         if not sections:
             return "Claude Code 사용량"
-        lines = [f"Claude Code  {checker.plan_name or ''}", ""]
+        header = f"Claude Code {checker.plan_name or ''}".strip()
+        lines = [header]
         for _, d, label in sections:
-            u   = d.get("utilization") or 0
-            rst = checker.format_reset_time(d.get("resets_at"))
-            lines.append(f"{_flag(u)}  {_short_label(label)}")
-            lines.append(f"   {_pct_bar(u)}  {u:.1f}%")
-            lines.append(f"   리셋까지  {rst}")
-            lines.append("")
-        return "\n".join(lines).rstrip()
+            u = d.get("utilization") or 0
+            lines.append(f"{_flag(u)} {_short_label(label)} {u:.1f}%")
+        text = "\n".join(lines)
+        if len(text) > 127:
+            text = text[:124] + "..."
+        return text
 
     def _make_menu():
         items = []
