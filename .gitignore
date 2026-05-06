@@ -2,4 +2,5 @@ agent-tools/agent/__pycache__/*
 agent-tools/usage-checker/__pycache__/*
 agent-tools/analyzer/__pycache__/*
 agent-tools/web/__pycache__/*
-agnet-tools/venv
+agent-tools/usage-checker/vbs_error.log
+agent-tools/venv

@@ -619,8 +619,44 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
         sys.exit(1)
 
     import threading
+    import plistlib
+    import subprocess
+    from pathlib import Path
 
     REFRESH_SEC = 60
+
+    # ── 시작 시 자동 실행 (LaunchAgent plist 방식) ──
+    _PLIST_LABEL = "com.claude.usage"
+    _PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_PLIST_LABEL}.plist"
+    _PY_SCRIPT = str(Path(__file__).resolve())
+
+    def _is_autostart_enabled() -> bool:
+        return _PLIST_PATH.exists()
+
+    def _set_autostart(enabled: bool):
+        if enabled:
+            _PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "Label": _PLIST_LABEL,
+                "ProgramArguments": [sys.executable, _PY_SCRIPT, "--tray"],
+                "RunAtLoad": True,
+                "KeepAlive": False,
+            }
+            with open(_PLIST_PATH, "wb") as f:
+                plistlib.dump(data, f)
+            subprocess.run(["launchctl", "load", str(_PLIST_PATH)], check=False)
+        else:
+            if _PLIST_PATH.exists():
+                subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], check=False)
+                try:
+                    _PLIST_PATH.unlink()
+                except Exception:
+                    pass
+
+    def _on_toggle_autostart(item):
+        new_state = item.state != 1
+        _set_autostart(new_state)
+        item.state = 1 if new_state else 0
 
     def _build_menu(fetch_cb):
         items = []
@@ -645,6 +681,11 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
             items.append(None)
 
         items.append(rumps.MenuItem("  ↺  새로고침", callback=fetch_cb))
+
+        auto_item = rumps.MenuItem("  시작 시 자동 실행", callback=_on_toggle_autostart)
+        auto_item.state = 1 if _is_autostart_enabled() else 0
+        items.append(auto_item)
+
         items.append(None)
         items.append(rumps.MenuItem("  종료", callback=rumps.quit_application))
         return items
@@ -695,24 +736,70 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
         print("Pillow 미설치: pip install pillow")
         sys.exit(1)
 
+    # 작업표시줄에 'python' 대신 'AI 사용량'으로 표시되도록 콘솔 창 제목 변경
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW("AI 사용량")
+    except Exception:
+        pass
+
     import threading
+    import os
+    import subprocess
+    from pathlib import Path
 
     _stop = threading.Event()
     _icon_holder: list = [None]
 
+    # ── 시작 시 자동 실행 (시작 폴더 단축키 방식) ──
+    _STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    _SHORTCUT_PATH = _STARTUP_DIR / "AI 사용량.lnk"
+    _VBS_TARGET = Path(__file__).resolve().parent / "Claude사용량.vbs"
+
+    def _is_autostart_enabled() -> bool:
+        return _SHORTCUT_PATH.exists()
+
+    def _set_autostart(enabled: bool):
+        if enabled:
+            if not _VBS_TARGET.exists():
+                return
+            _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+            ps = (
+                f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut("{_SHORTCUT_PATH}"); '
+                f'$s.TargetPath="{_VBS_TARGET}"; '
+                f'$s.WorkingDirectory="{_VBS_TARGET.parent}"; '
+                f'$s.Description="Claude 사용량 트레이"; '
+                f'$s.Save()'
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        else:
+            try:
+                _SHORTCUT_PATH.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _on_toggle_autostart(icon, item):
+        _set_autostart(not _is_autostart_enabled())
+        icon.update_menu()
+
     def _tooltip() -> str:
+        # Windows 트레이 툴팁은 최대 128자 제한 — compact 포맷 + 안전 컷
         sections = checker.get_usage_sections()
         if not sections:
             return "Claude Code 사용량"
-        lines = [f"Claude Code  {checker.plan_name or ''}", ""]
+        header = f"Claude Code {checker.plan_name or ''}".strip()
+        lines = [header]
         for _, d, label in sections:
-            u   = d.get("utilization") or 0
-            rst = checker.format_reset_time(d.get("resets_at"))
-            lines.append(f"{_flag(u)}  {_short_label(label)}")
-            lines.append(f"   {_pct_bar(u)}  {u:.1f}%")
-            lines.append(f"   리셋까지  {rst}")
-            lines.append("")
-        return "\n".join(lines).rstrip()
+            u = d.get("utilization") or 0
+            lines.append(f"{_flag(u)} {_short_label(label)} {u:.1f}%")
+        text = "\n".join(lines)
+        if len(text) > 127:
+            text = text[:124] + "..."
+        return text
 
     def _make_menu():
         items = []
@@ -738,6 +825,11 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
             items.append(pystray.Menu.SEPARATOR)
 
         items.append(pystray.MenuItem("  ↺  새로고침", _on_refresh))
+        items.append(pystray.MenuItem(
+            "  시작 시 자동 실행",
+            _on_toggle_autostart,
+            checked=lambda _i: _is_autostart_enabled(),
+        ))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("  종료", _on_quit))
         return pystray.Menu(*items)
