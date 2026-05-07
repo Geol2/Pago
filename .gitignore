@@ -4,4 +4,7 @@ agent-tools/analyzer/__pycache__/*
 agent-tools/web/__pycache__/*
 agent-tools/usage-checker/vbs_error.log
 agent-tools/usage-checker/usage_checker.log
+agent-tools/usage-checker/build/**
+agent-tools/usage-checker/dist/**
+agent-tools/usage-checker/dist-template/**
 agent-tools/venv

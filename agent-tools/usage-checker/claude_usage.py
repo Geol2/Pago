@@ -788,20 +788,30 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
     # ── 시작 시 자동 실행 (시작 폴더 단축키 방식) ──
     _STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
     _SHORTCUT_PATH = _STARTUP_DIR / "AI 사용량.lnk"
-    _VBS_TARGET = Path(__file__).resolve().parent / "Claude사용량.vbs"
+
+    # PyInstaller로 패키징된 경우 sys.frozen=True — .exe 자체를 직접 가리킨다.
+    # 개발 환경에서는 기존대로 Claude사용량.vbs(파이썬 호출 래퍼)를 사용.
+    if getattr(sys, "frozen", False):
+        _AUTOSTART_TARGET = Path(sys.executable).resolve()
+        _AUTOSTART_ARGS = "--tray"
+    else:
+        _AUTOSTART_TARGET = Path(__file__).resolve().parent / "Claude사용량.vbs"
+        _AUTOSTART_ARGS = ""
 
     def _is_autostart_enabled() -> bool:
         return _SHORTCUT_PATH.exists()
 
     def _set_autostart(enabled: bool):
         if enabled:
-            if not _VBS_TARGET.exists():
+            if not _AUTOSTART_TARGET.exists():
                 return
             _STARTUP_DIR.mkdir(parents=True, exist_ok=True)
             ps = (
                 f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut("{_SHORTCUT_PATH}"); '
-                f'$s.TargetPath="{_VBS_TARGET}"; '
-                f'$s.WorkingDirectory="{_VBS_TARGET.parent}"; '
+                f'$s.TargetPath="{_AUTOSTART_TARGET}"; '
+                f'$s.Arguments="{_AUTOSTART_ARGS}"; '
+                f'$s.WorkingDirectory="{_AUTOSTART_TARGET.parent}"; '
+                f'$s.WindowStyle=7; '
                 f'$s.Description="Claude 사용량 트레이"; '
                 f'$s.Save()'
             )
