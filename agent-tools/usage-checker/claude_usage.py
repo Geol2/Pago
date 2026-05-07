@@ -11,6 +11,7 @@ import subprocess
 import json
 import os
 import sys
+import time
 import requests
 
 if sys.platform == "win32":
@@ -19,6 +20,20 @@ if sys.platform == "win32":
 
 from datetime import datetime
 from typing import Optional, Dict, Any
+
+
+# ──────────────────────────────────────────────
+# 진단 로그 — 인증/요청 실패 원인 추적용
+# ──────────────────────────────────────────────
+
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_checker.log")
+
+def _log(msg: str):
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass
 
 
 # ──────────────────────────────────────────────
@@ -73,7 +88,10 @@ class ClaudeUsageChecker:
         ]
         for path in candidates:
             if os.path.exists(path):
-                return self._parse_credentials_file(path)
+                ok = self._parse_credentials_file(path)
+                _log(f"_get_credentials_windows: {path} 로드 {'성공' if ok else '실패'}")
+                return ok
+        _log("_get_credentials_windows: 후보 경로 모두 없음 - " + " / ".join(candidates))
         print("인증 정보를 찾을 수 없습니다.")
         return False
 
@@ -129,19 +147,35 @@ class ClaudeUsageChecker:
         return None
 
     def fetch_usage(self) -> bool:
-        if not self.token:
-            return False
-        try:
-            response = requests.get(self.API_URL, headers=self._auth_headers(), timeout=10)
-            if response.status_code == 200:
-                self.usage_data = response.json()
-                self.plan_name = self._extract_plan(self.usage_data)
-                if not self.plan_name:
-                    self._fetch_plan_from_account()
-                return True
-            return False
-        except requests.exceptions.RequestException:
-            return False
+        # 콜드 스타트 시 자격이 아직 안 로드/만료된 경우를 위해 짧은 백오프 재시도
+        for attempt in range(3):
+            if not self.token:
+                _log(f"fetch_usage: 토큰 없음 (시도 {attempt + 1}) — 자격 재로드")
+                self.get_credentials_from_keychain()
+                if not self.token:
+                    time.sleep(2)
+                    continue
+            try:
+                response = requests.get(self.API_URL, headers=self._auth_headers(), timeout=10)
+                if response.status_code == 200:
+                    self.usage_data = response.json()
+                    self.plan_name = self._extract_plan(self.usage_data)
+                    if not self.plan_name:
+                        self._fetch_plan_from_account()
+                    return True
+                # 401: 토큰 만료 가능성 — 자격 재로드 후 즉시 재시도
+                if response.status_code == 401 and attempt < 2:
+                    _log(f"fetch_usage: 401 인증 실패 — 자격 재로드 후 재시도")
+                    self.token = None
+                    self.get_credentials_from_keychain()
+                    time.sleep(1)
+                    continue
+                _log(f"fetch_usage: HTTP {response.status_code} body={response.text[:200]}")
+                return False
+            except requests.exceptions.RequestException as e:
+                _log(f"fetch_usage: 네트워크 오류 (시도 {attempt + 1}): {e}")
+                time.sleep(2)
+        return False
 
     def _fetch_plan_from_account(self):
         """account 엔드포인트에서 플랜 정보를 보완 시도."""
