@@ -739,7 +739,10 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
             if not checker.token:
                 checker.get_credentials_from_keychain()
             checker.fetch_usage()
-            self._update()
+            # AppKit 객체는 반드시 메인 스레드에서 수정해야 함.
+            # rumps.Timer(interval=0) 은 다음 런루프 틱에 메인 스레드에서 콜백을 실행한다.
+            t = rumps.Timer(lambda sender: (self._update(), sender.stop()), 0)
+            t.start()
 
         def _update(self):
             sections = checker.get_usage_sections()
