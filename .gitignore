@@ -7,4 +7,5 @@ agent-tools/usage-checker/usage_checker.log
 agent-tools/usage-checker/build/**
 agent-tools/usage-checker/dist/**
 agent-tools/usage-checker/dist-template/**
+agent-tools/usage-checker/hooks/__pycache__/**
 agent-tools/venv

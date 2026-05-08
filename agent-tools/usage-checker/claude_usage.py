@@ -15,8 +15,16 @@ import time
 import requests
 
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # --noconsole 빌드(.exe)에서는 stdout/stderr가 None — print() 호출 시 크래시 방지
+    import io as _io
+    if sys.stdout is None:
+        sys.stdout = _io.StringIO()
+    else:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is None:
+        sys.stderr = _io.StringIO()
+    else:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -624,8 +632,143 @@ def _tray_color(pct: float) -> tuple:
     return (166, 227, 161)                # 초록
 
 
-def _make_pil_icon(pct_max: float = 0):
-    """pystray용 PIL 아이콘 — 어두운 원 위에 게이지 호."""
+# ──────────────────────────────────────────────
+# 에이전트(Claude Code) 작업 상태 — 훅이 ~/.claude/agent_state.json 에 기록
+# ──────────────────────────────────────────────
+
+_AGENT_STATE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "agent_state.json")
+
+# 우선순위: 여러 세션이 있으면 가장 "활동 중"인 상태를 채택.
+_STATE_PRIORITY = {"waiting": 3, "working": 2, "done": 1, "idle": 0, "unknown": 0}
+
+# done(만세) 표시 지속 시간 — 이후 자동으로 idle 로 강등
+_DONE_DISPLAY_SECONDS = 5
+
+_STATE_LABELS_KO = {
+    "working": "🔨 오크 열일 중",
+    "waiting": "❓ 컨펌 대기 중",
+    "done":    "✅ Jobs done!",
+    "idle":    "💤 대기",
+}
+
+
+def _load_agent_state() -> dict:
+    """훅이 남긴 상태 파일을 읽어 (잘못된 경우 빈 dict)."""
+    try:
+        if not os.path.exists(_AGENT_STATE_FILE):
+            return {}
+        with open(_AGENT_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _aggregate_agent_state(max_idle_seconds: int = 600, min_event_at=None) -> dict:
+    """
+    여러 세션의 상태를 단일 표시용 dict 로 집계.
+    반환: {state, sessions: [{state, tool, cwd, updated_at, age_seconds}], updated_at}
+    max_idle_seconds 초 이상 갱신 없으면 'idle'로 강등.
+    min_event_at(datetime)가 주어지면 그 시각 이전의 이벤트는 idle 로 간주
+    — 위젯 시작 전에 남은 이전 세션 흔적을 무시하기 위함.
+    """
+    data = _load_agent_state()
+    sessions = data.get("sessions") or {}
+    now = datetime.now()
+
+    rendered = []
+    best_state = "idle"
+    best_priority = -1
+    latest_ts = None
+
+    for sid, info in sessions.items():
+        if not isinstance(info, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(info.get("updated_at", ""))
+        except Exception:
+            continue
+        age = (now - ts).total_seconds()
+        raw_state = info.get("state") or "unknown"
+        # 'done'(만세)은 짧게만 보여주고 곧바로 idle 로 강등 — 사용자 요청
+        # 그 외 상태는 max_idle_seconds 동안 유지
+        state = raw_state
+        # 위젯 시작 전에 일어난 이벤트는 모두 idle 로 처리 (오래된 세션 흔적 무시)
+        if min_event_at is not None and ts < min_event_at:
+            state = "idle"
+        elif raw_state == "done" and age > _DONE_DISPLAY_SECONDS:
+            state = "idle"
+        elif age > max_idle_seconds:
+            state = "idle"
+
+        rendered.append({
+            "session_id": sid,
+            "state": state,
+            "raw_state": raw_state,
+            "tool": info.get("tool") or "",
+            "cwd": info.get("cwd") or "",
+            "updated_at": info.get("updated_at") or "",
+            "age_seconds": int(age),
+        })
+        prio = _STATE_PRIORITY.get(state, 0)
+        if prio > best_priority:
+            best_priority = prio
+            best_state = state
+        if latest_ts is None or ts > latest_ts:
+            latest_ts = ts
+
+    # 최근 활동순 정렬
+    rendered.sort(key=lambda s: s["age_seconds"])
+    return {
+        "state": best_state,
+        "sessions": rendered,
+        "updated_at": latest_ts.isoformat(timespec="seconds") if latest_ts else None,
+    }
+
+
+def _agent_badge_color(state: str) -> tuple:
+    """배지 RGB."""
+    if state == "working": return (250, 179, 135)  # 주황 — 열일
+    if state == "waiting": return (249, 226, 175)  # 노랑 — 대기
+    if state == "done":    return (166, 227, 161)  # 초록 — 완료
+    return (108, 112, 134)                          # 회색 — idle
+
+
+def _draw_state_badge(img, state: str):
+    """기존 게이지 아이콘 우상단에 작은 상태 배지 그리기."""
+    from PIL import ImageDraw
+    if state in (None, "idle", "unknown"):
+        return
+    draw = ImageDraw.Draw(img)
+    # 우상단 22x22 배지
+    s = 24
+    pad = 2
+    x0, y0 = 64 - s - pad, pad
+    x1, y1 = 64 - pad, s + pad
+    bg = _agent_badge_color(state) + (255,)
+    fg = (30, 30, 46, 255)
+    draw.ellipse([x0, y0, x1, y1], fill=bg, outline=fg, width=2)
+
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    if state == "working":
+        # 망치 — 자루 + 머리
+        draw.line([cx - 4, cy + 6, cx + 4, cy - 4], fill=fg, width=2)
+        draw.rectangle([cx + 1, cy - 7, cx + 7, cy - 2], fill=fg)
+    elif state == "waiting":
+        # ? — 호 + 점
+        draw.arc([cx - 5, cy - 7, cx + 5, cy + 1], start=200, end=340, fill=fg, width=2)
+        draw.line([cx, cy + 1, cx, cy + 4], fill=fg, width=2)
+        draw.ellipse([cx - 1, cy + 5, cx + 1, cy + 7], fill=fg)
+    elif state == "done":
+        # ✓ — 두 선분
+        draw.line([cx - 5, cy + 1, cx - 1, cy + 5], fill=fg, width=2)
+        draw.line([cx - 1, cy + 5, cx + 6, cy - 4], fill=fg, width=2)
+
+
+def _make_pil_icon(pct_max: float = 0, agent_state: str = "idle"):
+    """pystray용 PIL 아이콘 — 어두운 원 위에 게이지 호 + 우상단 작업 상태 배지."""
     from PIL import Image, ImageDraw
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -635,7 +778,29 @@ def _make_pil_icon(pct_max: float = 0):
         color = _tray_color(pct_max) + (255,)
         end_angle = -90 + 360 * min(pct_max, 100) / 100
         draw.arc([8, 8, 56, 56], start=-90, end=end_angle, fill=color, width=10)
+    _draw_state_badge(img, agent_state)
     return img
+
+
+def _agent_state_lines(agent: dict) -> list[str]:
+    """툴팁/메뉴용 사람-가독 표현."""
+    lines = []
+    label = _STATE_LABELS_KO.get(agent.get("state", "idle"), "💤 대기")
+    lines.append(label)
+    sessions = agent.get("sessions") or []
+    if not sessions:
+        return lines
+    # 활성 세션이 여럿이면 최대 3개만 보여줌
+    for s in sessions[:3]:
+        st = s.get("state", "")
+        sub_label = _STATE_LABELS_KO.get(st, st)
+        proj = os.path.basename(s.get("cwd") or "") or "(?)"
+        tool = s.get("tool") or ""
+        suffix = f" · {tool}" if tool and st in ("working",) else ""
+        lines.append(f"  · {proj}{suffix}  [{sub_label}]")
+    if len(sessions) > 3:
+        lines.append(f"  · 외 {len(sessions) - 3}개 세션")
+    return lines
 
 
 def run_tray(checker: ClaudeUsageChecker):
@@ -696,6 +861,12 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
         items = []
         sections = checker.get_usage_sections()
 
+        # 에이전트 작업 상태
+        agent = _aggregate_agent_state()
+        for line in _agent_state_lines(agent):
+            items.append(rumps.MenuItem(line))
+        items.append(None)
+
         # 헤더: 플랜명
         if checker.plan_name:
             items.append(rumps.MenuItem(f"  {checker.plan_name}"))
@@ -724,6 +895,13 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
         items.append(rumps.MenuItem("  종료", callback=rumps.quit_application))
         return items
 
+    _STATE_PREFIX_KO = {
+        "working": "🔨",
+        "waiting": "❓",
+        "done":    "✅",
+        "idle":    "☁",
+    }
+
     class UsageMenuBar(rumps.App):
         def __init__(self):
             super().__init__("☁ ...", quit_button=None)
@@ -731,9 +909,15 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
                          rumps.MenuItem("종료", callback=rumps.quit_application)]
             threading.Thread(target=self._fetch, daemon=True).start()
             rumps.Timer(self._auto_refresh, REFRESH_SEC).start()
+            # 에이전트 상태는 더 자주 갱신 (2초)
+            rumps.Timer(self._refresh_state, 2).start()
 
         def _auto_refresh(self, _):
             threading.Thread(target=self._fetch, daemon=True).start()
+
+        def _refresh_state(self, _):
+            # 사용량 API 호출 없이 상태 파일만 읽어 메뉴/타이틀 갱신
+            self._update()
 
         def _fetch(self):
             if not checker.token:
@@ -748,7 +932,9 @@ def _run_tray_macos(checker: ClaudeUsageChecker):
             title_pcts = [d.get("utilization") or 0 for k, d, _ in sections if k in priority]
             if not title_pcts:
                 title_pcts = [d.get("utilization") or 0 for _, d, _ in sections]
-            self.title = ("☁ " + " | ".join(f"{int(p)}%" for p in title_pcts)) if title_pcts else "☁ --"
+            agent_state = _aggregate_agent_state().get("state", "idle")
+            prefix = _STATE_PREFIX_KO.get(agent_state, "☁")
+            self.title = (f"{prefix} " + " | ".join(f"{int(p)}%" for p in title_pcts)) if title_pcts else f"{prefix} --"
             # clear() 없이 대입하면 rumps 내부 dict에 누적되므로 반드시 먼저 지움
             self.menu.clear()
             self.menu = _build_menu(
@@ -832,14 +1018,21 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
 
     def _tooltip() -> str:
         # Windows 트레이 툴팁은 최대 128자 제한 — compact 포맷 + 안전 컷
+        agent = _aggregate_agent_state()
         sections = checker.get_usage_sections()
-        if not sections:
-            return "Claude Code 사용량"
-        header = f"Claude Code {checker.plan_name or ''}".strip()
-        lines = [header]
-        for _, d, label in sections:
-            u = d.get("utilization") or 0
-            lines.append(f"{_flag(u)} {_short_label(label)} {u:.1f}%")
+        lines = []
+        # 에이전트 상태가 있으면 첫 줄에 표시 (가장 눈에 띄도록)
+        agent_line = _STATE_LABELS_KO.get(agent.get("state", "idle"))
+        if agent_line:
+            lines.append(agent_line)
+        if sections:
+            header = f"Claude {checker.plan_name or ''}".strip()
+            lines.append(header)
+            for _, d, label in sections:
+                u = d.get("utilization") or 0
+                lines.append(f"{_flag(u)} {_short_label(label)} {u:.1f}%")
+        elif not lines:
+            lines.append("Claude Code 사용량")
         text = "\n".join(lines)
         if len(text) > 127:
             text = text[:124] + "..."
@@ -848,6 +1041,12 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
     def _make_menu():
         items = []
         sections = checker.get_usage_sections()
+
+        # ── 에이전트 작업 상태 섹션 ──
+        agent = _aggregate_agent_state()
+        for line in _agent_state_lines(agent):
+            items.append(pystray.MenuItem(line, None, enabled=False))
+        items.append(pystray.Menu.SEPARATOR)
 
         if checker.plan_name:
             items.append(pystray.MenuItem(f"  {checker.plan_name}", None, enabled=False))
@@ -885,26 +1084,53 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
         _stop.set()
         icon.stop()
 
-    def _fetch_and_update():
-        if not checker.token:
-            checker.get_credentials_from_keychain()
-        checker.fetch_usage()
+    # 마지막으로 그린 아이콘 키 — 동일하면 재생성 생략 (CPU 절약)
+    _last_render_key: list = [None]
+
+    def _redraw_icon_if_changed():
         ic = _icon_holder[0]
         if ic is None:
             return
         sections = checker.get_usage_sections()
         pcts = [d.get("utilization") or 0 for _, d, _ in sections]
-        ic.icon  = _make_pil_icon(max(pcts) if pcts else 0)
+        pct_max = max(pcts) if pcts else 0
+        agent = _aggregate_agent_state()
+        agent_state = agent.get("state", "idle")
+        # 변경 감지 키 — 사용률(정수)과 상태로 캐시
+        key = (int(pct_max), agent_state)
+        if key != _last_render_key[0]:
+            ic.icon = _make_pil_icon(pct_max, agent_state=agent_state)
+            _last_render_key[0] = key
         ic.title = _tooltip()
-        ic.menu  = _make_menu()
+        ic.menu = _make_menu()
+
+    def _fetch_and_update():
+        if not checker.token:
+            checker.get_credentials_from_keychain()
+        checker.fetch_usage()
+        _redraw_icon_if_changed()
 
     def _auto_refresh_loop():
+        # 사용량 API 폴링 — 60초
         while not _stop.wait(60):
             _fetch_and_update()
 
+    def _agent_state_loop():
+        # 에이전트 상태 파일 폴링 — 2초 (mtime 기반 변경 감지)
+        last_mtime = 0.0
+        while not _stop.wait(2):
+            try:
+                mtime = os.path.getmtime(_AGENT_STATE_FILE) if os.path.exists(_AGENT_STATE_FILE) else 0.0
+            except Exception:
+                mtime = 0.0
+            # 파일이 바뀌었거나, 시간이 지나 'idle'로 강등될 수도 있어 주기적으로 재계산
+            if mtime != last_mtime:
+                last_mtime = mtime
+            _redraw_icon_if_changed()
+
     icon = pystray.Icon(
         "claude_usage",
-        _make_pil_icon(0),
+        _make_pil_icon(0, agent_state="idle"),
         "Claude Code 사용량",
         pystray.Menu(pystray.MenuItem("로딩 중...", None, enabled=False)),
     )
@@ -912,6 +1138,7 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
 
     threading.Thread(target=_fetch_and_update, daemon=True).start()
     threading.Thread(target=_auto_refresh_loop, daemon=True).start()
+    threading.Thread(target=_agent_state_loop, daemon=True).start()
     icon.run()
 
 
@@ -919,10 +1146,552 @@ def _run_tray_windows(checker: ClaudeUsageChecker):
 # 진입점
 # ──────────────────────────────────────────────
 
+# ──────────────────────────────────────────────
+# 데스크탑 오크 위젯 — 항상 위로, 투명 배경, 상태별 애니메이션
+# ──────────────────────────────────────────────
+
+_ORC_W = 160
+_ORC_H = 180
+
+# 스프라이트 디렉토리 — 아래 파일명 규칙으로 두면 PIL 드로잉 대신 사용:
+#   <state>.gif         → 애니메이션 (각 프레임 자체 duration 존중)
+#   <state>_1.png, _2…  → 번호 시퀀스 (100ms 간격)
+#   <state>.png         → 단일 정적 이미지
+# state ∈ {idle, working, waiting, done}. 파일 없으면 PIL 도형 폴백.
+_ORC_IMAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orc_images")
+_FRAME_CACHE: dict = {}  # state -> [(PIL.Image, duration_ms), ...]
+
+# 색 팔레트 — magenta(투명키)는 절대 쓰지 않음
+# 워크래프트3 피온 스타일
+_ORC_SKIN       = (140, 180, 90)
+_ORC_SKIN_DARK  = (90, 130, 60)
+_ORC_TUSK       = (250, 245, 220)
+_ORC_EYE_W      = (240, 240, 240)
+_ORC_INK        = (30, 30, 46)
+_ORC_CLOTH      = (80, 60, 50)
+_ORC_HOOD       = (110, 80, 55)    # 피온 후드 갈색
+_ORC_HOOD_DARK  = (70, 48, 28)     # 후드 안쪽 그림자
+_ORC_APRON      = (155, 105, 60)   # 가죽 앞치마
+_ORC_APRON_DARK = (95, 60, 30)     # 허리띠
+_ORC_BUCKLE     = (200, 170, 80)   # 벨트 버클(놋쇠)
+_ORC_HAMMER_HEAD = (90, 95, 110)
+_ORC_HAMMER_HANDLE = (140, 95, 50)
+
+
+def _draw_orc(state: str, frame: int):
+    """160x180 RGBA 워크래프트3 일꾼(피온) 초상화 — 얼굴 중심 클로즈업."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGBA", (_ORC_W, _ORC_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    bob = (frame % 2) * 2
+
+    # ── 후드/헝겊 (얼굴 뒤에 펼쳐진 갈색 두건) ──
+    hood_top = 4 + bob
+    d.polygon([
+        (45, hood_top - 2), (80, hood_top - 6), (115, hood_top - 2),
+        (140, hood_top + 22), (150, hood_top + 70),
+        (146, hood_top + 130), (130, hood_top + 154),
+        (30, hood_top + 154), (14, hood_top + 130),
+        (10, hood_top + 70), (20, hood_top + 22),
+    ], fill=_ORC_HOOD, outline=_ORC_INK, width=2)
+    # 후드 안쪽 그림자
+    d.chord([24, hood_top + 6, 136, hood_top + 60],
+            start=180, end=360, fill=_ORC_HOOD_DARK)
+
+    # ── 얼굴 (큰 타원, 캔버스 점령) ──
+    face_top = 22 + bob
+    face_bot = 148 + bob
+    d.ellipse([32, face_top, 128, face_bot],
+              fill=_ORC_SKIN, outline=_ORC_SKIN_DARK, width=2)
+    # 이마 그림자 (후드 안쪽 어둠)
+    d.chord([32, face_top, 128, face_top + 26],
+            start=180, end=360, fill=_ORC_SKIN_DARK)
+
+    # ── 눈 (크게) ──
+    eye_y = face_top + 28
+    if state == "idle":
+        d.arc([42, eye_y - 5, 68, eye_y + 7], start=0, end=180, fill=_ORC_INK, width=3)
+        d.arc([92, eye_y - 5, 118, eye_y + 7], start=0, end=180, fill=_ORC_INK, width=3)
+    else:
+        d.ellipse([42, eye_y - 9, 68, eye_y + 9],
+                  fill=_ORC_EYE_W, outline=_ORC_INK, width=2)
+        d.ellipse([92, eye_y - 9, 118, eye_y + 9],
+                  fill=_ORC_EYE_W, outline=_ORC_INK, width=2)
+        if state == "waiting":
+            px, py = 6, 2   # 옆을 흘끗
+        elif state == "done":
+            px, py = 0, -1
+        else:  # working
+            px, py = 2, 3
+        d.ellipse([51 + px, eye_y - 4 + py, 59 + px, eye_y + 4 + py], fill=_ORC_INK)
+        d.ellipse([101 + px, eye_y - 4 + py, 109 + px, eye_y + 4 + py], fill=_ORC_INK)
+
+    # ── 큰 코 (얼굴 중앙 점령) ──
+    nose_top = face_top + 42
+    nose_bot = face_top + 96
+    d.ellipse([56, nose_top, 104, nose_bot],
+              fill=_ORC_SKIN, outline=_ORC_SKIN_DARK, width=2)
+    # 콧등 하이라이트
+    d.ellipse([64, nose_top + 8, 80, nose_top + 32], fill=(170, 210, 115))
+    # 콧구멍
+    d.ellipse([66, nose_bot - 14, 76, nose_bot - 5], fill=_ORC_INK)
+    d.ellipse([84, nose_bot - 14, 94, nose_bot - 5], fill=_ORC_INK)
+
+    # ── 입 + 큰 송곳니 ──
+    mouth_y = face_top + 112
+    # 입
+    if state == "done":
+        d.arc([60, mouth_y - 6, 100, mouth_y + 14], start=0, end=180, fill=_ORC_INK, width=3)
+    elif state == "working":
+        d.line([66, mouth_y + 4, 94, mouth_y + 6], fill=_ORC_INK, width=3)
+    elif state == "waiting":
+        # 멍하니 벌어진 입
+        d.ellipse([66, mouth_y - 4, 94, mouth_y + 14], fill=_ORC_INK)
+    else:  # idle
+        d.arc([72, mouth_y, 88, mouth_y + 8], start=0, end=180, fill=_ORC_INK, width=2)
+
+    # 송곳니 (위로 솟음, 매우 크게)
+    if state == "waiting":
+        # 입 벌렸을 때는 더 길게
+        tusk_top_y = mouth_y - 30
+    else:
+        tusk_top_y = mouth_y - 22
+    # 왼쪽
+    d.polygon([
+        (48, mouth_y + 14), (58, tusk_top_y), (68, mouth_y + 14)
+    ], fill=_ORC_TUSK, outline=_ORC_INK, width=2)
+    # 오른쪽
+    d.polygon([
+        (92, mouth_y + 14), (102, tusk_top_y), (112, mouth_y + 14)
+    ], fill=_ORC_TUSK, outline=_ORC_INK, width=2)
+
+    # ── 어깨/가슴 (살짝만) ──
+    body_y = 152 + bob
+    d.polygon([
+        (8, body_y), (28, body_y - 6),
+        (132, body_y - 6), (152, body_y),
+        (152, _ORC_H), (8, _ORC_H)
+    ], fill=_ORC_HOOD, outline=_ORC_INK, width=2)
+    # 가죽 어깨끈
+    d.rectangle([48, body_y, 112, body_y + 16],
+                fill=_ORC_APRON, outline=_ORC_INK)
+    # 버클
+    d.rectangle([74, body_y + 3, 86, body_y + 13],
+                fill=_ORC_BUCKLE, outline=_ORC_INK)
+
+    # ── 상태별 ──
+    if state == "working":
+        # 망치 — 오른쪽에서 위아래 스윙
+        swing = frame % 4
+        if swing == 0:
+            hx, hy = 148, 38
+        elif swing == 1:
+            hx, hy = 144, 80
+        elif swing == 2:
+            hx, hy = 148, 122
+        else:
+            hx, hy = 144, 80
+        sx, sy = 132, body_y + 4
+        d.line([sx, sy, hx, hy], fill=_ORC_HAMMER_HANDLE, width=6)
+        d.rectangle([hx - 14, hy - 10, hx + 12, hy + 10],
+                    fill=_ORC_HAMMER_HEAD, outline=_ORC_INK, width=2)
+        d.rectangle([hx - 11, hy - 7, hx + 9, hy - 1],
+                    fill=(125, 130, 145))
+        if swing == 2:
+            for sx2, sy2 in [(hx + 14, hy + 12), (hx - 24, hy + 14)]:
+                _draw_sparkle(d, sx2, sy2, 4, (249, 226, 175, 255))
+
+    elif state == "waiting":
+        # 오른쪽 송곳니에 묶인 뼈 장식
+        # 끈
+        d.line([(102, tusk_top_y + 8), (108, tusk_top_y + 18)],
+               fill=(245, 240, 220), width=2)
+        d.line([(108, tusk_top_y + 18), (114, mouth_y + 6)],
+               fill=(245, 240, 220), width=2)
+        # T자 뼈 — 앞치마 위에 매달림
+        bone_x, bone_y = 114, mouth_y + 10
+        d.rectangle([bone_x - 8, bone_y, bone_x + 6, bone_y + 5],
+                    fill=_ORC_TUSK, outline=_ORC_INK)
+        d.rectangle([bone_x - 3, bone_y + 4, bone_x + 1, bone_y + 14],
+                    fill=_ORC_TUSK, outline=_ORC_INK)
+
+        # 말풍선 + ?  (우상단 — 후드 위로)
+        bub_top = 0 - bob
+        bub_left, bub_right = 112, 158
+        d.ellipse([bub_left, bub_top, bub_right, bub_top + 28],
+                  fill=(255, 255, 255), outline=_ORC_INK, width=2)
+        d.polygon([(bub_left + 4, bub_top + 22),
+                   (bub_left, bub_top + 36),
+                   (bub_left + 14, bub_top + 24)],
+                  fill=(255, 255, 255), outline=_ORC_INK)
+        try:
+            font = ImageFont.truetype("arial.ttf", 18)
+        except Exception:
+            font = ImageFont.load_default()
+        d.text((bub_left + 16, bub_top + 4), "?", fill=_ORC_INK, font=font)
+
+    elif state == "done":
+        # 만세 팔 (양 옆 위로)
+        d.line([24, body_y - 4, 8, 20], fill=_ORC_HOOD, width=10)
+        d.ellipse([0, 12, 22, 34], fill=_ORC_SKIN, outline=_ORC_SKIN_DARK, width=2)
+        d.line([136, body_y - 4, 152, 20], fill=_ORC_HOOD, width=10)
+        d.ellipse([138, 12, 160, 34], fill=_ORC_SKIN, outline=_ORC_SKIN_DARK, width=2)
+        sparkle_color = (249, 226, 175, 255)
+        positions = [(2, 4), (158, 4), (78, 0)] if frame % 2 == 0 else [(8, 36), (152, 36), (80, 8)]
+        for sx, sy in positions:
+            _draw_sparkle(d, sx, sy, 5, sparkle_color)
+
+    return img
+
+
+def _draw_sparkle(draw, cx: int, cy: int, r: int, color):
+    """4-점 별 — PIL 폴리곤."""
+    pts = [
+        (cx, cy - r),
+        (cx + r // 2, cy - r // 2),
+        (cx + r, cy),
+        (cx + r // 2, cy + r // 2),
+        (cx, cy + r),
+        (cx - r // 2, cy + r // 2),
+        (cx - r, cy),
+        (cx - r // 2, cy - r // 2),
+    ]
+    draw.polygon(pts, fill=color)
+
+
+def _draw_project_name(name: str):
+    """160x16 RGBA — 프로젝트명(cwd 베이스네임) 작은 배지."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGBA", (_ORC_W, 16), (0, 0, 0, 0))
+    if not name:
+        return img
+    if len(name) > 16:
+        name = name[:14] + "…"
+    d = ImageDraw.Draw(img)
+    font = None
+    for path in ("malgun.ttf", "AppleGothic.ttf", "NotoSansCJK-Regular.ttc"):
+        try:
+            font = ImageFont.truetype(path, 10)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    bbox = d.textbbox((0, 0), name, font=font)
+    tw = bbox[2] - bbox[0]
+    pad = 6
+    cx = _ORC_W // 2
+    bg_l = max(0, cx - tw // 2 - pad)
+    bg_r = min(_ORC_W, cx + tw // 2 + pad)
+    d.rounded_rectangle([bg_l, 1, bg_r, 14], radius=6,
+                        fill=(40, 45, 60, 220), outline=(120, 125, 145, 255))
+    d.text((cx - tw // 2, 1), name, fill=(220, 225, 230, 255), font=font)
+    return img
+
+
+def _draw_orc_label(state: str):
+    """오크 아래에 그릴 상태 라벨 PIL 이미지 (160x24)."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGBA", (_ORC_W, 24), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    # 이모지 폰트 의존 제거 — 한글 폰트 안전 텍스트만 사용
+    label = {
+        "working": "열일 중...",
+        "waiting": "컨펌 대기",
+        "done":    "Jobs done!",
+        "idle":    "z z z",
+    }.get(state, "")
+    color = {
+        "working": (250, 179, 135),
+        "waiting": (249, 226, 175),
+        "done":    (166, 227, 161),
+        "idle":    (180, 185, 200),
+    }.get(state, (200, 200, 200))
+    if not label:
+        return img
+    d.rounded_rectangle([10, 2, 150, 22], radius=10, fill=color + (240,), outline=(30, 30, 46, 255))
+    font = None
+    for path in ("malgun.ttf", "AppleGothic.ttf", "NotoSansCJK-Regular.ttc"):
+        try:
+            font = ImageFont.truetype(path, 12)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    bbox = d.textbbox((0, 0), label, font=font)
+    tw = bbox[2] - bbox[0]
+    d.text((_ORC_W // 2 - tw // 2, 5), label, fill=(30, 30, 46, 255), font=font)
+    return img
+
+
+def _fit_to_canvas(img):
+    """이미지를 _ORC_W x _ORC_H 안에 들어가도록 비율 유지하며 리사이즈."""
+    from PIL import Image
+    iw, ih = img.size
+    scale = min(_ORC_W / iw, _ORC_H / ih)
+    if scale < 1.0:
+        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        img = img.resize((nw, nh), Image.LANCZOS)
+    return img
+
+
+def _load_state_frames(state: str):
+    """상태별 스프라이트 프레임 로드. 반환: [(PIL.Image, duration_ms), ...]
+    파일 없으면 빈 리스트 — 호출자가 PIL 폴백 사용."""
+    from PIL import Image
+    import glob
+
+    if state in _FRAME_CACHE:
+        return _FRAME_CACHE[state]
+
+    frames: list = []
+    if not os.path.isdir(_ORC_IMAGE_DIR):
+        _FRAME_CACHE[state] = frames
+        return frames
+
+    # 1) GIF (애니메이션, 프레임별 duration 존중)
+    gif_path = os.path.join(_ORC_IMAGE_DIR, f"{state}.gif")
+    if os.path.exists(gif_path):
+        try:
+            img = Image.open(gif_path)
+            n = getattr(img, "n_frames", 1)
+            for i in range(n):
+                img.seek(i)
+                f = img.convert("RGBA").copy()
+                f = _fit_to_canvas(f)
+                dur = max(50, int(img.info.get("duration", 100)))
+                frames.append((f, dur))
+        except Exception as e:
+            _log(f"_load_state_frames: GIF 로드 실패 {gif_path}: {e}")
+            frames = []
+
+    # 2) 번호 시퀀스 PNG
+    if not frames:
+        seq = sorted(glob.glob(os.path.join(_ORC_IMAGE_DIR, f"{state}_*.png")))
+        for path in seq:
+            try:
+                f = Image.open(path).convert("RGBA")
+                f = _fit_to_canvas(f)
+                frames.append((f, 100))
+            except Exception as e:
+                _log(f"_load_state_frames: PNG 시퀀스 로드 실패 {path}: {e}")
+
+    # 3) 단일 PNG
+    if not frames:
+        single = os.path.join(_ORC_IMAGE_DIR, f"{state}.png")
+        if os.path.exists(single):
+            try:
+                f = Image.open(single).convert("RGBA")
+                f = _fit_to_canvas(f)
+                # 정적 이미지 — 큰 duration 으로 사실상 고정
+                frames.append((f, 10_000))
+            except Exception as e:
+                _log(f"_load_state_frames: PNG 로드 실패 {single}: {e}")
+
+    _FRAME_CACHE[state] = frames
+    return frames
+
+
+def run_orc_widget():
+    """데스크탑 오크 위젯 — 항상 위로, 투명, 드래그 가능. 인증 불필요."""
+    import tkinter as tk
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        print("Pillow 미설치: pip install pillow")
+        sys.exit(1)
+
+    TICK_MS = 250  # 애니메이션 간격
+    TRANSP = "magenta"  # Windows 투명 처리용 컬러키
+
+    root = tk.Tk()
+    root.title("Claude Orc")
+    root.overrideredirect(True)               # 창 테두리 제거
+    root.attributes("-topmost", True)         # 항상 위
+
+    # ── 플랫폼별 투명 배경 ──
+    canvas_bg = TRANSP  # 기본값
+    if sys.platform == "win32":
+        # 컬러키 방식 — magenta 픽셀만 투명
+        root.configure(bg=TRANSP)
+        try:
+            root.wm_attributes("-transparentcolor", TRANSP)
+        except tk.TclError:
+            pass
+    elif sys.platform == "darwin":
+        # macOS: Tk 8.6+ 의 실제 투명 윈도우
+        applied_transparent = False
+        try:
+            root.wm_attributes("-transparent", True)
+            root.configure(bg="systemTransparent")
+            canvas_bg = "systemTransparent"
+            applied_transparent = True
+        except tk.TclError:
+            pass
+        if not applied_transparent:
+            # 구버전 Tk — 알파 폴백
+            root.configure(bg=TRANSP)
+            try:
+                root.attributes("-alpha", 0.92)
+            except tk.TclError:
+                pass
+    else:
+        # Linux 등 — 알파 폴백
+        root.configure(bg=TRANSP)
+        try:
+            root.attributes("-alpha", 0.92)
+        except tk.TclError:
+            pass
+
+    # 카드 = 프로젝트명(16) + 오크(180) + 상태라벨(24) — 세션 1개당
+    PROJECT_H = 16
+    LABEL_H = 24
+    CARD_W = _ORC_W
+    CARD_H = PROJECT_H + _ORC_H + LABEL_H  # 220
+    GAP = 6
+    MAX_SESSIONS = 5
+
+    canvas = tk.Canvas(root, width=CARD_W, height=CARD_H,
+                       bg=canvas_bg, highlightthickness=0, bd=0)
+    canvas.pack()
+    img_id = canvas.create_image(0, 0, anchor="nw")
+    _photos: list = [None]
+
+    # ── 드래그 ──
+    def on_drag_start(e):
+        root._dx, root._dy = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
+    def on_drag_move(e):
+        root.geometry(f"+{e.x_root - root._dx}+{e.y_root - root._dy}")
+    canvas.bind("<ButtonPress-1>", on_drag_start)
+    canvas.bind("<B1-Motion>", on_drag_move)
+
+    # ── 우클릭 메뉴 ──
+    _compact = [False]
+    menu = tk.Menu(root, tearoff=0)
+    def _toggle_compact():
+        _compact[0] = not _compact[0]
+    menu.add_command(label="컴팩트 모드 (라벨 숨김)", command=_toggle_compact)
+    menu.add_separator()
+    menu.add_command(label="종료", command=root.destroy)
+    def on_right(e):
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
+    canvas.bind("<Button-3>", on_right)
+    if sys.platform == "darwin":
+        canvas.bind("<Button-2>", on_right)
+
+    # ── 초기 위치: 화면 우하단 ──
+    root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"+{sw - CARD_W - 40}+{sh - CARD_H - 100}")
+
+    widget_start = datetime.now()
+    anims: dict = {}        # sid -> {state, index, elapsed}
+    current_size = [CARD_W, CARD_H]
+
+    def _render_card(state: str, project: str, anim: dict, compact: bool):
+        """카드 한 장 PIL 이미지. compact 면 오크만, 아니면 프로젝트명+오크+라벨."""
+        h = _ORC_H if compact else CARD_H
+        card = Image.new("RGBA", (CARD_W, h), (0, 0, 0, 0))
+        # 오크 프레임 결정
+        anim["elapsed"] += TICK_MS
+        sprite_frames = _load_state_frames(state)
+        if sprite_frames:
+            cur_img, cur_dur = sprite_frames[anim["index"]]
+            if anim["elapsed"] >= cur_dur:
+                anim["elapsed"] = 0
+                anim["index"] = (anim["index"] + 1) % len(sprite_frames)
+                cur_img, _ = sprite_frames[anim["index"]]
+            blank = Image.new("RGBA", (_ORC_W, _ORC_H), (0, 0, 0, 0))
+            cx = (_ORC_W - cur_img.width) // 2
+            cy = (_ORC_H - cur_img.height) // 2
+            blank.alpha_composite(cur_img, (cx, cy))
+            orc_img = blank
+        else:
+            frame_n = int(anim["elapsed"] // 100) % 8
+            orc_img = _draw_orc(state, frame_n)
+
+        if compact:
+            card.alpha_composite(orc_img, (0, 0))
+        else:
+            card.alpha_composite(_draw_project_name(project), (0, 0))
+            card.alpha_composite(orc_img, (0, PROJECT_H))
+            card.alpha_composite(_draw_orc_label(state), (0, PROJECT_H + _ORC_H))
+        return card
+
+    def tick():
+        agent = _aggregate_agent_state(min_event_at=widget_start)
+        all_sessions = agent.get("sessions") or []
+        # 위젯 시작 후에 이벤트가 있었던 세션만 노출 — 켜기 전 잔재 무시
+        fresh = []
+        for s in all_sessions:
+            try:
+                ts = datetime.fromisoformat(s.get("updated_at", ""))
+                if ts >= widget_start:
+                    fresh.append(s)
+            except Exception:
+                pass
+        if not fresh:
+            fresh = [{"session_id": "__default__", "state": "idle",
+                      "cwd": "", "tool": ""}]
+        fresh = fresh[:MAX_SESSIONS]
+
+        # 사라진 세션 anim 정리
+        live_ids = {s["session_id"] for s in fresh}
+        for sid in list(anims.keys()):
+            if sid not in live_ids:
+                del anims[sid]
+
+        compact = _compact[0]
+        n = len(fresh)
+        card_h = _ORC_H if compact else CARD_H
+        total_w = n * CARD_W + max(0, n - 1) * GAP
+
+        composite = Image.new("RGBA", (total_w, card_h), (0, 0, 0, 0))
+        for i, s in enumerate(fresh):
+            sid = s["session_id"]
+            state = s.get("state", "idle")
+            project = os.path.basename(s.get("cwd") or "") or "(?)"
+            anim = anims.setdefault(sid, {"state": None, "index": 0, "elapsed": 0})
+            if anim["state"] != state:
+                anim["state"] = state
+                anim["index"] = 0
+                anim["elapsed"] = 0
+            card_img = _render_card(state, project, anim, compact)
+            composite.alpha_composite(card_img, (i * (CARD_W + GAP), 0))
+
+        # 캔버스 크기 갱신 (세션 수가 바뀌었거나 모드 토글)
+        if (total_w, card_h) != tuple(current_size):
+            canvas.config(width=total_w, height=card_h)
+            current_size[0], current_size[1] = total_w, card_h
+
+        _photos[0] = ImageTk.PhotoImage(composite)
+        canvas.itemconfigure(img_id, image=_photos[0])
+
+        root.after(TICK_MS, tick)
+
+    tick()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        root.destroy()
+
+
 def main():
     mode = "--tray"    if "--tray"    in sys.argv else \
            "--desktop" if "--desktop" in sys.argv else \
+           "--orc"     if "--orc"     in sys.argv else \
            "--graph"   if "--graph"   in sys.argv else "cli"
+
+    # 오크 위젯은 인증 불필요 — 상태 파일만 읽음
+    if mode == "--orc":
+        run_orc_widget()
+        return
 
     checker = ClaudeUsageChecker()
     if not checker.get_credentials_from_keychain():
