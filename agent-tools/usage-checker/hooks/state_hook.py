@@ -103,6 +103,8 @@ def main():
         # 디버깅용 — 어떤 알림이 들어와서 분류됐는지 기록
         "raw_event": event_arg,
         "message": payload.get("message", ""),
+        # Claude Code 프로세스 PID — 위젯이 종료 감지에 사용
+        "claude_pid": os.getppid(),
     }
 
     state_data["sessions"] = sessions

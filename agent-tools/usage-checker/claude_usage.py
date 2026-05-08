@@ -638,6 +638,26 @@ def _tray_color(pct: float) -> tuple:
 
 _AGENT_STATE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "agent_state.json")
 
+# 세션 종료 감지: idle 상태로 이만큼 지나면 사라진 것으로 간주 (PID 모르는 경우의 폴백)
+_ORPHAN_IDLE_SECONDS = 60
+
+
+def _is_pid_alive(pid) -> bool:
+    """프로세스 존재 확인. pid 가 None/잘못된 값이면 True (살아있다 가정)."""
+    if not pid:
+        return True
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return True
+    try:
+        os.kill(pid, 0)  # signal 0 = 권한 체크만, 프로세스 안 죽임
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return True
+
 # 우선순위: 여러 세션이 있으면 가장 "활동 중"인 상태를 채택.
 _STATE_PRIORITY = {"waiting": 3, "working": 2, "done": 1, "idle": 0, "unknown": 0}
 
@@ -711,6 +731,7 @@ def _aggregate_agent_state(max_idle_seconds: int = 600, min_event_at=None) -> di
             "cwd": info.get("cwd") or "",
             "updated_at": info.get("updated_at") or "",
             "age_seconds": int(age),
+            "claude_pid": info.get("claude_pid"),
         })
         prio = _STATE_PRIORITY.get(state, 0)
         if prio > best_priority:
@@ -1627,15 +1648,26 @@ def run_orc_widget():
     def tick():
         agent = _aggregate_agent_state(min_event_at=widget_start)
         all_sessions = agent.get("sessions") or []
-        # 위젯 시작 후에 이벤트가 있었던 세션만 노출 — 켜기 전 잔재 무시
+        now = datetime.now()
+        # 표시 조건: 위젯 시작 후 이벤트 있음 + Claude 프로세스 살아있음 +
+        #          idle 60초 미만 (idle 60초+ 는 세션 종료로 간주)
         fresh = []
         for s in all_sessions:
             try:
                 ts = datetime.fromisoformat(s.get("updated_at", ""))
-                if ts >= widget_start:
-                    fresh.append(s)
+                if ts < widget_start:
+                    continue
             except Exception:
-                pass
+                continue
+            # 1) Claude 프로세스 죽었으면 즉시 제거
+            pid = s.get("claude_pid")
+            if pid and not _is_pid_alive(pid):
+                continue
+            # 2) idle 상태로 너무 오래 → 세션 종료로 간주 (PID 폴백)
+            age = (now - ts).total_seconds()
+            if s.get("state") == "idle" and age > _ORPHAN_IDLE_SECONDS:
+                continue
+            fresh.append(s)
         if not fresh:
             fresh = [{"session_id": "__default__", "state": "idle",
                       "cwd": "", "tool": ""}]

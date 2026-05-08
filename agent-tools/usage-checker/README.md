@@ -47,6 +47,8 @@ pip3 install requests pillow rumps    # macOS
   - ✅ `done` — 양팔 만세 + 별 반짝임, 라벨 "Jobs done!" (5초 후 자동 idle 강등)
 - **여러 Claude Code 세션 동시 표시** — 세션마다 카드 한 장(프로젝트명 + 오크 + 라벨), 가로 나열, 최대 5개
 - 위젯 시작 후 발생한 이벤트만 노출 — 실행 전 잔재 무시
+- **세션 종료 자동 감지**: 훅이 Claude Code PID 기록 → 위젯이 매 tick 마다 PID 검사,
+  죽은 세션 즉시 카드 제거. PID 알 수 없으면 `idle 60초+` 폴백으로 정리
 - 마우스 좌클릭 드래그로 위치 이동, 우클릭 메뉴(컴팩트 모드/종료)
 - 인증 불필요 (상태 파일만 읽음)
 
@@ -89,6 +91,30 @@ PIL 도형으로 그린 기본 오크 대신 본인이 만든 이미지로 교�
 `<state>` ∈ `idle`, `working`, `waiting`, `done`.
 우선순위는 GIF → PNG 시퀀스 → 단일 PNG → (없으면) PIL 도형 폴백.
 이미지는 자동으로 비율 유지하며 160×180 안에 맞춰진다. 위젯 재시작하면 적용.
+
+## 바로가기 아이콘 (커맨드 없이 실행)
+
+### Windows
+
+| 파일 | 동작 |
+| --- | --- |
+| `Claude오크.vbs` | 콘솔 없이 백그라운드로 오크 위젯 실행 (에러 로그: `orc_widget.log`) |
+| `Claude오크.bat` | 콘솔 띄우고 실행 (디버그/첫 실행) |
+| `Claude사용량.vbs` | 트레이 백그라운드 실행 |
+| `오크 바로가기 만들기.bat` | **바탕화면에 "Claude 오크" 바로가기 자동 생성** ⭐ |
+
+→ `오크 바로가기 만들기.bat` 한 번 더블클릭하면 끝. 이후 바탕화면 아이콘으로 바로 실행.
+
+### macOS
+
+| 파일 | 동작 |
+| --- | --- |
+| `Claude orc.command` | 오크 위젯 백그라운드 실행 (이미 실행 중이면 무시) |
+| `Claude tray 사용량.command` | 메뉴바 트레이 실행 |
+| `Claude desktop 사용량.command` | 접기/펴기 위젯 실행 |
+| `오크 바로가기 만들기.command` | **바탕화면에 심볼릭 링크 생성** ⭐ |
+
+→ `오크 바로가기 만들기.command` 더블클릭 (처음 한 번 "열기" 권한 허용 필요).
 
 ## 자동 시작
 
@@ -175,12 +201,17 @@ agent-tools/usage-checker/
 ├── orc_images/              # 사용자 스프라이트 (선택)
 ├── build.bat                # Windows .exe 빌드
 ├── AI_Usage.spec            # PyInstaller 스펙
-├── Claude사용량.bat          # Windows 콘솔 런처
-├── Claude사용량.vbs          # Windows 콘솔 없는 런처
-├── Claude tray 사용량.command  # macOS 트레이 런처
-├── Claude desktop 사용량.command  # macOS 데스크탑 위젯 런처
-├── 자동시작 등록.bat          # Windows 자동시작 단축키 생성
-├── 자동시작 해제.bat          # Windows 자동시작 해제
+├── Claude사용량.bat          # Windows 콘솔 런처 (트레이)
+├── Claude사용량.vbs          # Windows 콘솔 없는 런처 (트레이)
+├── Claude오크.bat            # Windows 콘솔 런처 (오크)
+├── Claude오크.vbs            # Windows 콘솔 없는 런처 (오크)
+├── Claude tray 사용량.command # macOS 트레이 런처
+├── Claude desktop 사용량.command # macOS 데스크탑 위젯 런처
+├── Claude orc.command        # macOS 오크 위젯 런처
+├── 오크 바로가기 만들기.bat   # Windows 바탕화면 단축키 생성
+├── 오크 바로가기 만들기.command # macOS 바탕화면 심볼릭 링크 생성
+├── 자동시작 등록.bat          # Windows 부팅 자동시작 등록
+├── 자동시작 해제.bat          # Windows 부팅 자동시작 해제
 ├── usage_checker.log        # 인증/요청 진단 로그
 └── README.md                # 이 파일
 ```
