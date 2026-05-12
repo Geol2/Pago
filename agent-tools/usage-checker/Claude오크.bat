@@ -5,7 +5,7 @@ SET PYTHONUTF8=1
 SET SCRIPT_DIR=%~dp0
 SET PY_SCRIPT=%SCRIPT_DIR%claude_usage.py
 
-python -c "import PIL" 2>nul || pip install pillow -q
+python -c "import PIL" >nul 2>&1 || python -m pip install pillow -q >nul 2>&1
 
 python "%PY_SCRIPT%" --orc
 if %ERRORLEVEL% neq 0 pause

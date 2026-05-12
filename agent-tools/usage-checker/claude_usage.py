@@ -650,8 +650,29 @@ def _is_pid_alive(pid) -> bool:
         pid = int(pid)
     except (TypeError, ValueError):
         return True
+    if sys.platform == "win32":
+        # Windows: os.kill(pid, 0) 은 TerminateProcess 를 호출해 위험.
+        # OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) 로 존재만 확인.
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                # ERROR_INVALID_PARAMETER(87) = PID 없음, ERROR_ACCESS_DENIED(5) = 존재함
+                return kernel32.GetLastError() == 5
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    STILL_ACTIVE = 259
+                    return exit_code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
     try:
-        os.kill(pid, 0)  # signal 0 = 권한 체크만, 프로세스 안 죽임
+        os.kill(pid, 0)  # POSIX: signal 0 = 권한 체크만, 프로세스 안 죽임
         return True
     except OSError:
         return False
@@ -1451,11 +1472,11 @@ def _draw_orc_label(state: str):
 
 
 def _fit_to_canvas(img):
-    """이미지를 _ORC_W x _ORC_H 안에 들어가도록 비율 유지하며 리사이즈."""
+    """이미지를 _ORC_W x _ORC_H 안에 들어가도록 비율 유지하며 리사이즈 (확대/축소 양방향)."""
     from PIL import Image
     iw, ih = img.size
     scale = min(_ORC_W / iw, _ORC_H / ih)
-    if scale < 1.0:
+    if scale != 1.0:
         nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
         img = img.resize((nw, nh), Image.LANCZOS)
     return img
@@ -1652,8 +1673,8 @@ def run_orc_widget():
         agent = _aggregate_agent_state(min_event_at=widget_start)
         all_sessions = agent.get("sessions") or []
         now = datetime.now()
-        # 표시 조건: 위젯 시작 후 이벤트 있음 + Claude 프로세스 살아있음 +
-        #          idle 60초 미만 (idle 60초+ 는 세션 종료로 간주)
+        # 표시 조건: 위젯 시작 후 이벤트 있음 + idle 60초 미만 (idle 60초+ 는 세션 종료로 간주)
+        # PID 기반 종료 감지는 제거 — 훅이 기록하는 claude_pid 가 중간 셸 PID 일 수 있어 신뢰 불가.
         fresh = []
         for s in all_sessions:
             try:
@@ -1662,11 +1683,7 @@ def run_orc_widget():
                     continue
             except Exception:
                 continue
-            # 1) Claude 프로세스 죽었으면 즉시 제거
-            pid = s.get("claude_pid")
-            if pid and not _is_pid_alive(pid):
-                continue
-            # 2) idle 상태로 너무 오래 → 세션 종료로 간주 (PID 폴백)
+            # idle 상태로 너무 오래 → 세션 종료로 간주
             age = (now - ts).total_seconds()
             if s.get("state") == "idle" and age > _ORPHAN_IDLE_SECONDS:
                 continue
