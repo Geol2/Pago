@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Pago Backend (Debug)",
+            "request": "launch",
+            "mainClass": "com.example.pago.PagoApplication",
+            "projectName": "pago",
+            "args": [],
+            "envFile": "${workspaceFolder}/.env",
+            "vmArgs": "-Dspring.profiles.active=local",
+            "cwd": "${workspaceFolder}/backend"
+        },
+        {
+            "type": "java",
+            "name": "Pago Backend (Remote Debug)",
+            "request": "attach",
+            "hostName": "localhost",
+            "port": 5005
+        }
+    ]
+}

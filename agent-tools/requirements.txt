@@ -1,6 +1,16 @@
 requests>=2.31.0
 questionary>=2.0.0
+rich>=13.0.0
+
+# Code Analyzer
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+javalang>=0.13.0          # Java AST 파싱
+anthropic>=0.40.0         # Claude API (선택)
 
 # --tray 모드 (선택)
 # macOS:   pip install rumps
 # Windows: pip install pystray pillow
+
+# --widget 모드 (macOS 투명 배경, 선택)
+# macOS:   pip install pyobjc-framework-Cocoa
