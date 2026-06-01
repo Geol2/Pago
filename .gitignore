@@ -11,3 +11,4 @@ agent-tools/usage-checker/hooks/__pycache__/**
 agent-tools/venv
 
 dinner-picker/.dinner_history.json
+dinner-picker/__pycache__/**
